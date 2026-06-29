@@ -90,6 +90,7 @@ sudo systemctl restart media-server
 | `/history` | история загрузок |
 | `/scan` | пересканировать библиотеку Plex |
 | `/backup` | сохранить бэкап настроек на сервер |
+| `/update` | обновить с GitHub (`git pull`) и перезапустить |
 | `/help` | все команды |
 
 Также можно просто прислать боту `.torrent`-файл или magnet-ссылку.

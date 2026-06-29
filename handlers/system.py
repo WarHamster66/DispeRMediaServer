@@ -1,5 +1,6 @@
 """System info commands and /start."""
 import logging
+import subprocess
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -8,6 +9,8 @@ from core.auth import is_authorized
 from services import system_monitor
 
 logger = logging.getLogger(__name__)
+
+SERVICE_NAME = 'media-server'
 
 
 def register(bot) -> None:
@@ -24,6 +27,8 @@ def register(bot) -> None:
     bot.message_handler(commands=['clear_logs'])(lambda m: _cmd_clear_logs(bot, m))
     bot.message_handler(commands=['backup'])(lambda m: _cmd_backup(bot, m))
     bot.message_handler(commands=['scan'])(lambda m: _cmd_scan(bot, m))
+    bot.message_handler(commands=['update'])(lambda m: _do_update(bot, m.chat.id, m.from_user.id))
+    bot.callback_query_handler(func=lambda c: c.data == 'sys:update')(lambda c: _cb_update(bot, c))
 
 
 def _simple(bot, message, fn) -> None:
@@ -38,11 +43,11 @@ def _cmd_start(bot, message) -> None:
         bot.reply_to(message, 'Нет доступа.')
         return
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton('⬇️ Торренты', callback_data='torrent:noop'),
-           InlineKeyboardButton('📋 Отчёт', callback_data='report:noop'))
+    kb.add(InlineKeyboardButton('🔄 Обновить медиасервер', callback_data='sys:update'))
     bot.send_message(
         message.chat.id,
         '👋 Медиасервер онлайн. Используй /help для списка команд.',
+        reply_markup=kb,
     )
 
 
@@ -70,7 +75,8 @@ def _cmd_help(bot, message) -> None:
         '/export_logs — скачать лог-файл\n'
         '/clear_logs — очистить лог-файл\n'
         '/scan — пересканировать библиотеку Plex\n'
-        '/backup — сохранить бэкап настроек на сервер\n\n'
+        '/backup — сохранить бэкап настроек на сервер\n'
+        '/update — обновить медиасервер с GitHub и перезапустить\n\n'
         '📂 Файлы\n'
         '/dir — просмотр и удаление файлов\n'
         '/dir2 — управление папками\n'
@@ -135,3 +141,54 @@ def _cmd_scan(bot, message) -> None:
         bot.reply_to(message, f'🔄 Plex: запущено сканирование {n} библиотек.')
     except Exception as e:
         bot.reply_to(message, f'⚠️ Не удалось обратиться к Plex: {e}')
+
+
+def _cb_update(bot, call) -> None:
+    if not is_authorized(call.from_user.id):
+        bot.answer_callback_query(call.id, 'Нет доступа')
+        return
+    bot.answer_callback_query(call.id, 'Запускаю обновление…')
+    _do_update(bot, call.message.chat.id, call.from_user.id)
+
+
+def _do_update(bot, chat_id: int, user_id: int) -> None:
+    """git pull + обновление зависимостей + перезапуск сервиса."""
+    if not is_authorized(user_id):
+        bot.send_message(chat_id, 'Нет доступа.')
+        return
+
+    base = str(config.BASE_DIR)
+    bot.send_message(chat_id, '🔄 Проверяю обновления…')
+
+    # git pull
+    try:
+        r = subprocess.run(['git', '-C', base, 'pull', '--ff-only'],
+                           capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        bot.send_message(chat_id, f'❌ Ошибка git pull: {e}')
+        return
+
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0:
+        bot.send_message(chat_id, f'❌ git pull не удался:\n{out[:600]}')
+        return
+    if 'up to date' in out.lower() or 'up-to-date' in out.lower():
+        bot.send_message(chat_id, '✅ Уже последняя версия.')
+        return
+
+    # обновляем зависимости (вдруг появились новые)
+    pip = config.BASE_DIR / 'venv' / 'bin' / 'pip'
+    if pip.exists():
+        try:
+            subprocess.run([str(pip), 'install', '-q', '-r', str(config.BASE_DIR / 'requirements.txt')],
+                           timeout=300)
+        except Exception as e:
+            logger.warning(f'pip update failed: {e}')
+
+    commit = subprocess.run(['git', '-C', base, 'log', '-1', '--format=%h %s'],
+                            capture_output=True, text=True).stdout.strip()
+    bot.send_message(chat_id, f'✅ Обновлено до:\n{commit}\n\n♻️ Перезапускаюсь…')
+
+    # Перезапуск выполняет systemd (наш процесс при этом завершится).
+    # Требуется правило sudoers NOPASSWD на systemctl restart (ставит установщик).
+    subprocess.Popen(['sudo', '-n', 'systemctl', 'restart', SERVICE_NAME])

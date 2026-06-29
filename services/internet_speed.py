@@ -19,8 +19,8 @@ _UP_BYTES = 5_000_000      # ~5 MB на отдачу
 
 
 def get_internet_speed() -> str:
+    # ── Download (основная метрика) ──
     try:
-        # ── Download ──
         t0 = time.time()
         r = requests.get(_DOWN, params={'bytes': _DOWN_BYTES}, timeout=30, stream=True)
         r.raise_for_status()
@@ -29,14 +29,17 @@ def get_internet_speed() -> str:
             received += len(chunk)
         dt = time.time() - t0
         dl = (received * 8) / dt / 1_000_000 if dt > 0 else 0
+    except Exception as e:
+        logger.error(f"Speedtest download error: {e}")
+        return f"⚠️ Speedtest недоступен: {e}"
 
-        # ── Upload ──
+    # ── Upload (необязательно — часто рвётся за DPI/прокси) ──
+    try:
         t1 = time.time()
         requests.post(_UP, data=b'\0' * _UP_BYTES, timeout=30)
         ut = time.time() - t1
         ul = (_UP_BYTES * 8) / ut / 1_000_000 if ut > 0 else 0
-
         return f"📈 Скорость: ▼ {dl:.1f} Mbps  ▲ {ul:.1f} Mbps"
     except Exception as e:
-        logger.error(f"Speedtest error: {e}")
-        return f"⚠️ Speedtest недоступен: {e}"
+        logger.warning(f"Speedtest upload skipped: {e}")
+        return f"📈 Скорость: ▼ {dl:.1f} Mbps  (отдача недоступна)"

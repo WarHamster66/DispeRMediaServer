@@ -640,6 +640,14 @@ WantedBy=multi-user.target
     run(['systemctl', 'daemon-reload'])
     run(['systemctl', 'enable', SERVICE_NAME])
 
+    # Разрешаем боту перезапускать себя без пароля — для команды /update
+    sudoers = Path('/etc/sudoers.d/media-server')
+    sudoers.write_text(
+        f'{run_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {SERVICE_NAME}\n'
+    )
+    sudoers.chmod(0o440)
+    ok("Боту разрешён перезапуск через /update (sudoers)")
+
     if env.get('TELEGRAM_TOKEN') and env.get('TELEGRAM_CHAT_ID'):
         run(['systemctl', 'restart', SERVICE_NAME])
         time.sleep(3)
