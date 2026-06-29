@@ -641,9 +641,10 @@ WantedBy=multi-user.target
     run(['systemctl', 'enable', SERVICE_NAME])
 
     # Разрешаем боту перезапускать себя без пароля — для команды /update
+    systemctl = shutil.which('systemctl') or '/usr/bin/systemctl'
     sudoers = Path('/etc/sudoers.d/media-server')
     sudoers.write_text(
-        f'{run_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {SERVICE_NAME}\n'
+        f'{run_user} ALL=(root) NOPASSWD: {systemctl} restart {SERVICE_NAME}\n'
     )
     sudoers.chmod(0o440)
     ok("Боту разрешён перезапуск через /update (sudoers)")
