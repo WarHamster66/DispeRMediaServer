@@ -31,6 +31,11 @@ _WMO = {
 _coords: tuple | None = None  # кэш: (lat, lon, name)
 
 
+def _proxies():
+    """Если задан PROXY_URL — гоним запросы через него (прямой доступ может быть закрыт)."""
+    return {'http': config.PROXY_URL, 'https': config.PROXY_URL} if config.PROXY_URL else None
+
+
 def _get_coords():
     global _coords
     if _coords:
@@ -38,7 +43,8 @@ def _get_coords():
     r = requests.get(
         _GEO,
         params={'name': config.WEATHER_CITY, 'count': 1, 'language': 'ru', 'format': 'json'},
-        timeout=10,
+        timeout=15,
+        proxies=_proxies(),
     ).json()
     results = r.get('results')
     if not results:
@@ -65,7 +71,8 @@ def get_weather() -> str:
                 'timezone': 'auto',
                 'forecast_days': 1,
             },
-            timeout=10,
+            timeout=15,
+            proxies=_proxies(),
         ).json()
 
         cur = d['current']
