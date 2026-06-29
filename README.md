@@ -123,6 +123,17 @@ sudo systemctl restart transmission-daemon
 
 (замените `/media/media-server` на свой путь к медиапапке).
 
+### Speedtest показывает только скачивание
+
+По умолчанию замер идёт через Cloudflare (без установки), но отдача за DPI/прокси
+часто рвётся. Для полного замера (↓ и ↑) поставь официальный Ookla CLI — бот
+определит его автоматически:
+
+```bash
+curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
+sudo apt install speedtest
+```
+
 ## Безопасность
 
 - Не коммитьте `.env` — он в `.gitignore`.
