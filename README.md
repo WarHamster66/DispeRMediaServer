@@ -33,7 +33,7 @@
 ## Установка
 
 ```bash
-git clone https://github.com/<your-user>/DispeRMediaServer.git
+git clone https://github.com/WarHamster66/DispeRMediaServer.git
 cd DispeRMediaServer
 sudo python3 install.py
 ```
