@@ -1,0 +1,20 @@
+{
+    "DISK_PATH": "/media/media-server",
+    "DOWNLOAD_DIR": "/media/media-server/Torrent/",
+    "LOG_FILE": "logs/server.log",
+    "HISTORY_FILE": "data/download_history.json",
+    "NETWORK_FILE": "data/network_usage.json",
+    "REPORT_CONFIG_FILE": "data/report_config.json",
+    "WEATHER_CITY": "Moscow",
+    "TIMEZONE": "system",
+    "SHARED_FOLDER": "/media/media-server",
+    "USE_ALLOWED_FOLDERS": true,
+    "ALLOWED_FOLDERS": ["Сериалы", "Мультсериалы", "Films", "Torrent"],
+    "PROTECTED_FOLDERS": ["Сериалы", "Мультсериалы", "Films", "Torrent"],
+    "CUSTOM_SERVICES": ["smbd", "plexmediaserver", "transmission-daemon", "media-server"],
+    "HDD_DEVICE": "/dev/sdb",
+    "DISK_ALERT_THRESHOLD_PERCENT": 10,
+    "PLEX_URL": "http://localhost:32400",
+    "PLEX_TOKEN": "",
+    "BACKUP_DIR": ""
+}

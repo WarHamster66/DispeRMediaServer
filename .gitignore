@@ -1,0 +1,23 @@
+# Secrets — NEVER commit
+.env
+
+# Runtime data
+data/
+logs/
+*.log
+network_usage.json
+report_config.json
+
+# Local Claude settings
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
