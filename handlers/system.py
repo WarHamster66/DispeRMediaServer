@@ -1,6 +1,7 @@
 """System info commands and /start."""
 import logging
 import subprocess
+from pathlib import Path
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -11,6 +12,7 @@ from services import system_monitor
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = 'media-server'
+_UPDATE_FLAG = config.BASE_DIR / 'data' / '.update_notify'
 
 
 def register(bot) -> None:
@@ -29,6 +31,27 @@ def register(bot) -> None:
     bot.message_handler(commands=['scan'])(lambda m: _cmd_scan(bot, m))
     bot.message_handler(commands=['update'])(lambda m: _do_update(bot, m.chat.id, m.from_user.id))
     bot.callback_query_handler(func=lambda c: c.data == 'sys:update')(lambda c: _cb_update(bot, c))
+    _notify_after_restart(bot)
+
+
+def _notify_after_restart(bot) -> None:
+    """Если перезапуск был вызван командой /update — сообщить, что бот снова онлайн."""
+    if not _UPDATE_FLAG.exists():
+        return
+    try:
+        chat_id = int(_UPDATE_FLAG.read_text().strip())
+        commit = subprocess.run(
+            ['git', '-C', str(config.BASE_DIR), 'log', '-1', '--format=%h %s'],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        bot.send_message(chat_id, f'✅ Обновление применено, бот снова в строю.\n{commit}')
+    except Exception as e:
+        logger.warning(f'Update notify failed: {e}')
+    finally:
+        try:
+            _UPDATE_FLAG.unlink()
+        except OSError:
+            pass
 
 
 def _simple(bot, message, fn) -> None:
@@ -188,6 +211,12 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     commit = subprocess.run(['git', '-C', base, 'log', '-1', '--format=%h %s'],
                             capture_output=True, text=True).stdout.strip()
     bot.send_message(chat_id, f'✅ Обновлено до:\n{commit}\n\n♻️ Перезапускаюсь…')
+
+    # Оставляем флажок, чтобы после рестарта прислать «бот снова в строю»
+    try:
+        _UPDATE_FLAG.write_text(str(chat_id))
+    except Exception as e:
+        logger.warning(f'Could not write update flag: {e}')
 
     # Перезапуск выполняет systemd (наш процесс при этом завершится).
     # Требуется правило sudoers NOPASSWD на systemctl restart (ставит установщик).
