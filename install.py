@@ -450,6 +450,8 @@ def step_samba(disk: dict) -> dict:
     subprocess.run(['smbpasswd', '-a', '-s', smb_user],
                    input=f"{smb_pass}\n{smb_pass}\n", text=True, check=False)
     run(['smbpasswd', '-e', smb_user], check=False)
+    # Доступ к медиапапке — через общую группу 'media' (создана на шаге дисков)
+    run(['usermod', '-aG', 'media', smb_user], check=False)
     ok(f"Samba-пользователь готов: {smb_user}")
 
     # Убираем старый блок с тем же именем если он уже есть
@@ -466,9 +468,10 @@ def step_samba(disk: dict) -> dict:
    read only = no
    guest ok = no
    valid users = {smb_user}
-   force user = nobody
-   create mask = 0777
-   directory mask = 0777
+   force user = {smb_user}
+   force group = media
+   create mask = 0664
+   directory mask = 2775
 """
     SAMBA_CONF.write_text(conf_text + new_block)
 

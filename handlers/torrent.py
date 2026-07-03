@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 
+import psutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
@@ -263,6 +264,20 @@ def _callback(bot, call) -> None:
             return
         folder = config.ALLOWED_FOLDERS[idx]
         location = os.path.join(config.SHARED_FOLDER, folder)
+
+        # Проверяем место именно на диске выбранной папки — папки могут
+        # находиться на разных дисках (например, Torrent на SSD, Films на HDD).
+        if pending['size'] and os.path.isdir(location):
+            free = psutil.disk_usage(location).free
+            if free < pending['size']:
+                _pending[msg_id] = pending  # вернуть — пусть выберет другую папку
+                bot.answer_callback_query(
+                    call.id,
+                    f'❌ В «{folder}» мало места: свободно {_fmt(free)}, нужно {_fmt(pending["size"])}',
+                    show_alert=True,
+                )
+                return
+
         try:
             tr.set_location(pending['torrent_id'], location)
             tr.mark_active(pending['file_hash'])
