@@ -189,7 +189,12 @@ def _cmd_disks(bot, message) -> None:
     lines = []
     seen = set()
     for p in psutil.disk_partitions():
+        # Только реальные диски: без snap-образов (loop/squashfs) и служебных разделов
         if not p.device.startswith('/dev/') or p.mountpoint in seen:
+            continue
+        if p.device.startswith('/dev/loop') or p.fstype == 'squashfs':
+            continue
+        if p.mountpoint.startswith(('/boot', '/snap')):
             continue
         seen.add(p.mountpoint)
         try:
@@ -197,8 +202,10 @@ def _cmd_disks(bot, message) -> None:
         except OSError:
             continue
         gb = 1024 ** 3
+        icon = '🖥' if p.mountpoint == '/' else '💽'
+        name = 'Системный диск' if p.mountpoint == '/' else p.mountpoint
         lines.append(
-            f'💽 {p.mountpoint}\n'
+            f'{icon} {name}\n'
             f'   {p.device} · {p.fstype} · свободно {u.free / gb:.1f} ГБ из {u.total / gb:.1f} ГБ ({u.percent}% занято)'
         )
     text = '\n\n'.join(lines) if lines else 'Диски не найдены.'
