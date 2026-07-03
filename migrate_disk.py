@@ -193,8 +193,14 @@ def main():
                 dst = f'{mnt}/{f}'
                 Path(dst).mkdir(parents=True, exist_ok=True)
                 if Path(src).is_dir() and not Path(src).is_mount():
-                    info(f"Переношу «{f}»… (может занять время)")
-                    r = run(['rsync', '-a', f'{src}/', f'{dst}/'], check=False)
+                    size_out = run(['du', '-sh', src], capture=True).stdout.split()
+                    total = size_out[0] if size_out else '?'
+                    info(f"Переношу «{f}» ({total})… прогресс ниже:")
+                    # --info=progress2 — общий прогресс: скопировано / % / скорость
+                    # --no-inc-recursive — сначала считает объём, чтобы % был честным
+                    r = run(['rsync', '-a', '--info=progress2', '--no-inc-recursive',
+                             f'{src}/', f'{dst}/'], check=False)
+                    print()
                     if r.returncode != 0:
                         err(f"rsync для «{f}» завершился с ошибкой — папка НЕ удалена, продолжаю со следующей.")
                         continue

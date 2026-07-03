@@ -33,6 +33,7 @@ def get_client() -> Client:
         port=config.TRANSMISSION_PORT,
         username=config.TRANSMISSION_USER,
         password=config.TRANSMISSION_PASSWORD,
+        timeout=60,  # при активной записи на диск демон может отвечать медленно
     )
 
 
@@ -119,16 +120,33 @@ def _monitor_loop(bot, chat_id: int, message_id: int, torrent_id: int, file_hash
     stall_count = 0
     max_stalls = 4
     prev_progress = -1
+    conn_errors = 0
+    max_conn_errors = 10  # ~5 минут недоступности демона подряд
 
     while True:
         try:
             tc = get_client()
             torrent = tc.get_torrent(torrent_id)
+            conn_errors = 0
         except Exception as e:
-            logger.error(f"Failed to get torrent {torrent_id}: {e}")
-            bot.send_message(chat_id, f"⚠️ Ошибка мониторинга: {e}")
-            mark_done(file_hash)
-            return
+            # Временный сбой RPC (демон занят записью на диск и т.п.) — не повод
+            # бросать мониторинг: ждём и пробуем снова.
+            conn_errors += 1
+            logger.warning(
+                f"Monitor: RPC error {conn_errors}/{max_conn_errors} "
+                f"for torrent {torrent_id}: {e}"
+            )
+            if conn_errors >= max_conn_errors:
+                logger.error(f"Monitor gave up on torrent {torrent_id}: {e}")
+                bot.send_message(
+                    chat_id,
+                    f"⚠️ Transmission не отвечает уже {max_conn_errors} попыток — "
+                    f"мониторинг остановлен. Загрузка продолжается, проверь /torrents",
+                )
+                mark_done(file_hash)
+                return
+            time.sleep(30)
+            continue
 
         try:
             if torrent.status == 'seeding':

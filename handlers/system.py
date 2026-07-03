@@ -189,14 +189,15 @@ def _cmd_disks(bot, message) -> None:
     lines = []
     seen = set()
     for p in psutil.disk_partitions():
-        # Только реальные диски: без snap-образов (loop/squashfs) и служебных разделов
-        if not p.device.startswith('/dev/') or p.mountpoint in seen:
+        # Только реальные диски: без snap-образов (loop/squashfs), служебных
+        # разделов и bind-монтирований (один физический диск — одна строка)
+        if not p.device.startswith('/dev/') or p.device in seen:
             continue
         if p.device.startswith('/dev/loop') or p.fstype == 'squashfs':
             continue
         if p.mountpoint.startswith(('/boot', '/snap')):
             continue
-        seen.add(p.mountpoint)
+        seen.add(p.device)
         try:
             u = psutil.disk_usage(p.mountpoint)
         except OSError:
