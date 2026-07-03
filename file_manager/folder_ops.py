@@ -131,6 +131,8 @@ def _handle(bot, call) -> None:
             return
         try:
             shutil.rmtree(path)
+            from core.audit import audit
+            audit(call.from_user, 'DELETE_FOLDER', path)
             bot.answer_callback_query(call.id, 'Папка удалена')
             parent = os.path.dirname(path)
             bot.edit_message_text(

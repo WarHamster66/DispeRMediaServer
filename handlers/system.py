@@ -3,9 +3,11 @@ import logging
 import subprocess
 from pathlib import Path
 
+import psutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
+from core.audit import audit, tail as audit_tail
 from core.auth import is_authorized
 from services import system_monitor
 
@@ -29,6 +31,8 @@ def register(bot) -> None:
     bot.message_handler(commands=['clear_logs'])(lambda m: _cmd_clear_logs(bot, m))
     bot.message_handler(commands=['backup'])(lambda m: _cmd_backup(bot, m))
     bot.message_handler(commands=['scan'])(lambda m: _cmd_scan(bot, m))
+    bot.message_handler(commands=['audit'])(lambda m: _cmd_audit(bot, m))
+    bot.message_handler(commands=['disks'])(lambda m: _cmd_disks(bot, m))
     bot.message_handler(commands=['update'])(lambda m: _do_update(bot, m.chat.id, m.from_user.id))
     bot.callback_query_handler(func=lambda c: c.data == 'sys:update')(lambda c: _cb_update(bot, c))
     _notify_after_restart(bot)
@@ -99,7 +103,9 @@ def _cmd_help(bot, message) -> None:
         '/clear_logs — очистить лог-файл\n'
         '/scan — пересканировать библиотеку Plex\n'
         '/backup — сохранить бэкап настроек на сервер\n'
-        '/update — обновить медиасервер с GitHub и перезапустить\n\n'
+        '/update — обновить медиасервер с GitHub и перезапустить\n'
+        '/audit — журнал действий (кто что удалил/добавил)\n'
+        '/disks — подключённые диски и свободное место\n\n'
         '📂 Файлы\n'
         '/dir — просмотр и удаление файлов\n'
         '/dir2 — управление папками\n'
@@ -136,8 +142,8 @@ def _cmd_clear_logs(bot, message) -> None:
         return
     try:
         open(config.LOG_FILE, 'w').close()
+        audit(message.from_user, 'CLEAR_LOGS')  # аудит-лог при этом сохраняется
         bot.reply_to(message, '✅ Лог-файл очищен.')
-        logger.info(f'Log file cleared by user {message.from_user.id}')
     except Exception as e:
         bot.reply_to(message, f'Ошибка: {e}')
 
@@ -149,6 +155,7 @@ def _cmd_backup(bot, message) -> None:
     try:
         from services.backup import save_backup
         path = save_backup()
+        audit(message.from_user, 'BACKUP', str(path))
         bot.reply_to(message, f'🗄 Бэкап сохранён на сервере:\n{path}')
     except Exception as e:
         bot.reply_to(message, f'Ошибка бэкапа: {e}')
@@ -164,6 +171,39 @@ def _cmd_scan(bot, message) -> None:
         bot.reply_to(message, f'🔄 Plex: запущено сканирование {n} библиотек.')
     except Exception as e:
         bot.reply_to(message, f'⚠️ Не удалось обратиться к Plex: {e}')
+
+
+def _cmd_audit(bot, message) -> None:
+    """Последние записи журнала действий — кто что удалял/добавлял."""
+    if not is_authorized(message.from_user.id):
+        bot.reply_to(message, 'Нет доступа.')
+        return
+    bot.reply_to(message, f'🕵️ Журнал действий (последние записи):\n\n{audit_tail(15)}')
+
+
+def _cmd_disks(bot, message) -> None:
+    """Все подключённые диски с местом — удобно после подключения нового."""
+    if not is_authorized(message.from_user.id):
+        bot.reply_to(message, 'Нет доступа.')
+        return
+    lines = []
+    seen = set()
+    for p in psutil.disk_partitions():
+        if not p.device.startswith('/dev/') or p.mountpoint in seen:
+            continue
+        seen.add(p.mountpoint)
+        try:
+            u = psutil.disk_usage(p.mountpoint)
+        except OSError:
+            continue
+        gb = 1024 ** 3
+        lines.append(
+            f'💽 {p.mountpoint}\n'
+            f'   {p.device} · {p.fstype} · свободно {u.free / gb:.1f} ГБ из {u.total / gb:.1f} ГБ ({u.percent}% занято)'
+        )
+    text = '\n\n'.join(lines) if lines else 'Диски не найдены.'
+    text += '\n\n💡 Для переноса папок на новый диск:  sudo python3 migrate_disk.py'
+    bot.reply_to(message, text)
 
 
 def _cb_update(bot, call) -> None:
@@ -210,6 +250,7 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
 
     commit = subprocess.run(['git', '-C', base, 'log', '-1', '--format=%h %s'],
                             capture_output=True, text=True).stdout.strip()
+    audit(user_id, 'UPDATE', commit)
     bot.send_message(chat_id, f'✅ Обновлено до:\n{commit}\n\n♻️ Перезапускаюсь…')
 
     # Оставляем флажок, чтобы после рестарта прислать «бот снова в строю»

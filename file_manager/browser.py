@@ -124,7 +124,10 @@ def _handle(bot, call) -> None:
             bot.answer_callback_query(call.id, 'Файл не найден')
             return
         try:
+            size = os.path.getsize(path)
             os.remove(path)
+            from core.audit import audit
+            audit(call.from_user, 'DELETE_FILE', f'{path} ({size / 1024 ** 3:.2f} GB)')
             bot.answer_callback_query(call.id, 'Файл удалён')
             parent = os.path.dirname(path)
             bot.edit_message_text(

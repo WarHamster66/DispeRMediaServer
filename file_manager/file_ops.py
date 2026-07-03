@@ -236,6 +236,8 @@ def _handle(bot, call) -> None:
             bot.answer_callback_query(call.id, 'Недопустимый путь'); return
         try:
             shutil.move(src, new_path)
+            from core.audit import audit
+            audit(call.from_user, 'MOVE', f'{src} → {new_path}')
             bot.answer_callback_query(call.id, 'Перемещено')
             bot.edit_message_text(
                 f'✅ {os.path.basename(src)} → {dest_dir}',
@@ -293,6 +295,8 @@ def _step_create_folder(bot, message) -> None:
         return
     try:
         os.makedirs(new_path, exist_ok=False)
+        from core.audit import audit
+        audit(message.from_user, 'CREATE_FOLDER', new_path)
         bot.reply_to(message, f'✅ Папка создана: {new_path}')
     except FileExistsError:
         bot.reply_to(message, '❌ Папка уже существует.')
@@ -320,6 +324,8 @@ def _step_rename(bot, message, *, is_file: bool) -> None:
         return
     try:
         shutil.move(old_path, new_path)
+        from core.audit import audit
+        audit(message.from_user, 'RENAME', f'{old_path} → {new_path}')
         label = 'Файл' if is_file else 'Папка'
         bot.reply_to(message, f'✅ {label} переименован в: {new_name}')
     except Exception as e:

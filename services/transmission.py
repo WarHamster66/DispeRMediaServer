@@ -3,6 +3,7 @@
 Uses the maintained `transmission-rpc` library (Transmission 3.0 / 4.0 compatible).
 """
 import logging
+import os
 import threading
 import time
 
@@ -183,7 +184,19 @@ def _on_complete(bot, chat_id: int, message_id: int, torrent, file_hash: str, tc
             ),
         )
         tc.remove_torrent(torrent.id, delete_data=False)
-        bot.send_message(chat_id, f"🏁 {name} сохранён в {torrent.download_dir}")
+
+        # Статистика папки: сколько в ней уже занято и сколько свободно на диске
+        stats = ''
+        try:
+            dl_dir = torrent.download_dir
+            used = _dir_size(dl_dir)
+            free = psutil.disk_usage(dl_dir).free
+            folder_name = os.path.basename(dl_dir.rstrip('/'))
+            stats = f"\n📁 В «{folder_name}» теперь {_fmt_size(used)} · свободно {_fmt_size(free)}"
+        except Exception:
+            pass
+
+        bot.send_message(chat_id, f"🏁 {name} сохранён в {torrent.download_dir}{stats}")
         record_download(name, torrent.total_size, torrent.download_dir)
         logger.info(f"Torrent completed: {name}")
 
@@ -195,6 +208,17 @@ def _on_complete(bot, chat_id: int, message_id: int, torrent, file_hash: str, tc
         bot.send_message(chat_id, f"⚠️ Ошибка при завершении загрузки: {e}")
     finally:
         mark_done(file_hash)
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
 
 
 def _fmt_size(b: int) -> str:

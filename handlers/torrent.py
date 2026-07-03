@@ -3,19 +3,26 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
+import time
 
 import psutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
+from core.audit import audit
 from core.auth import is_authorized
 from services import transmission as tr
 
 logger = logging.getLogger(__name__)
 
-# Pending confirmations: {message_id: {torrent_id, file_hash, name, size}}
+# Pending confirmations: {message_id: {torrent_id, file_hash, name, size, ts, chat_id, menu_msg_id}}
 # This is a dict-per-request so 10 simultaneous uploads all work independently.
 _pending: dict[int, dict] = {}
+_pending_lock = threading.Lock()
+
+# Если пользователь не выбрал папку за это время — торрент убирается из очереди
+_PENDING_TTL = 30 * 60  # 30 минут
 
 
 def register(bot) -> None:
@@ -34,6 +41,35 @@ def register(bot) -> None:
     bot.callback_query_handler(func=lambda c: c.data.startswith('torrent:'))(
         lambda c: _callback(bot, c)
     )
+    threading.Thread(target=_pending_cleanup_loop, args=(bot,),
+                     name='PendingCleanup', daemon=True).start()
+
+
+def _pending_cleanup_loop(bot) -> None:
+    """Раз в минуту убирает торренты, для которых так и не выбрали папку."""
+    while True:
+        time.sleep(60)
+        now = time.time()
+        expired = []
+        with _pending_lock:
+            for msg_id, p in list(_pending.items()):
+                if now - p.get('ts', now) > _PENDING_TTL:
+                    expired.append(p)
+                    _pending.pop(msg_id, None)
+        for p in expired:
+            try:
+                tr.remove_torrent(p['torrent_id'], delete_data=False)
+            except Exception as e:
+                logger.warning(f"Could not remove expired torrent {p['name']}: {e}")
+            audit('system', 'PENDING_EXPIRED', p['name'])
+            try:
+                bot.edit_message_text(
+                    f"⏰ Папка не выбрана за 30 минут — «{p['name']}» удалён из очереди.\n"
+                    f"Отправь торрент заново, если он ещё нужен.",
+                    p['chat_id'], p['menu_msg_id'],
+                )
+            except Exception:
+                pass
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -126,6 +162,7 @@ def _cmd_clear(bot, message) -> None:
                 tr.remove_torrent(t.id, delete_data=False)
             except Exception as e:
                 logger.error(f"Could not remove torrent {t.name}: {e}")
+        audit(message.from_user, 'CLEAR_DOWNLOADS', f'{len(torrents)} шт.')
         bot.reply_to(message, f'Удалено {len(torrents)} торрентов из очереди (файлы сохранены).')
     except Exception as e:
         bot.reply_to(message, f'Ошибка: {e}')
@@ -179,18 +216,22 @@ def _handle_torrent_file(bot, message) -> None:
             pass  # Non-critical — proceed
 
         size_str = _fmt(torrent.total_size) if torrent.total_size else 'неизвестно'
-        _pending[message.message_id] = {
-            'torrent_id': torrent.id,
-            'file_hash': file_hash,
-            'name': torrent.name,
-            'size': torrent.total_size,
-        }
-
-        bot.reply_to(
+        sent = bot.reply_to(
             message,
             f'📥 {torrent.name}\n📦 Размер: {size_str}\n\nКуда скачать?',
             reply_markup=_folder_keyboard(message.message_id),
         )
+        with _pending_lock:
+            _pending[message.message_id] = {
+                'torrent_id': torrent.id,
+                'file_hash': file_hash,
+                'name': torrent.name,
+                'size': torrent.total_size,
+                'ts': time.time(),
+                'chat_id': message.chat.id,
+                'menu_msg_id': sent.message_id,
+            }
+        audit(message.from_user, 'TORRENT_ADD', f'{torrent.name} ({size_str})')
 
     except Exception as e:
         logger.error(f'Error handling torrent file: {e}', exc_info=True)
@@ -215,17 +256,22 @@ def _handle_magnet(bot, message) -> None:
         return
     try:
         torrent = tr.add_magnet(magnet)
-        _pending[message.message_id] = {
-            'torrent_id': torrent.id,
-            'file_hash': file_hash,
-            'name': torrent.name or 'magnet',
-            'size': 0,
-        }
-        bot.reply_to(
+        sent = bot.reply_to(
             message,
             f'🧲 {torrent.name or "Магнет"}\n\nКуда скачать?',
             reply_markup=_folder_keyboard(message.message_id),
         )
+        with _pending_lock:
+            _pending[message.message_id] = {
+                'torrent_id': torrent.id,
+                'file_hash': file_hash,
+                'name': torrent.name or 'magnet',
+                'size': 0,
+                'ts': time.time(),
+                'chat_id': message.chat.id,
+                'menu_msg_id': sent.message_id,
+            }
+        audit(message.from_user, 'TORRENT_ADD', f'magnet: {torrent.name or magnet[:60]}')
         logger.info(f'Magnet added (paused): {torrent.name}')
     except Exception as e:
         logger.error(f'Error adding magnet: {e}', exc_info=True)
@@ -254,7 +300,8 @@ def _callback(bot, call) -> None:
         except ValueError:
             bot.answer_callback_query(call.id, 'Неверные данные')
             return
-        pending = _pending.pop(msg_id, None)
+        with _pending_lock:
+            pending = _pending.pop(msg_id, None)
         if not pending:
             bot.answer_callback_query(call.id, 'Запрос устарел')
             bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -270,7 +317,8 @@ def _callback(bot, call) -> None:
         if pending['size'] and os.path.isdir(location):
             free = psutil.disk_usage(location).free
             if free < pending['size']:
-                _pending[msg_id] = pending  # вернуть — пусть выберет другую папку
+                with _pending_lock:
+                    _pending[msg_id] = pending  # вернуть — пусть выберет другую папку
                 bot.answer_callback_query(
                     call.id,
                     f'❌ В «{folder}» мало места: свободно {_fmt(free)}, нужно {_fmt(pending["size"])}',
@@ -278,12 +326,23 @@ def _callback(bot, call) -> None:
                 )
                 return
 
+        # Статистика папки: сколько уже накачано и сколько влезет ещё
+        stats = ''
+        try:
+            if os.path.isdir(location):
+                used = _dir_size(location)
+                free = psutil.disk_usage(location).free
+                stats = f'\n📁 В «{folder}» уже {_fmt(used)} · свободно {_fmt(free)}'
+        except OSError:
+            pass
+
         try:
             tr.set_location(pending['torrent_id'], location)
             tr.mark_active(pending['file_hash'])
             tr.resume_torrent(pending['torrent_id'])
+            audit(call.from_user, 'TORRENT_START', f"{pending['name']} → {folder}")
             sent = bot.edit_message_text(
-                f"⏳ Загружается: {pending['name']}\n📁 Папка: {folder}\n⏳ 0%",
+                f"⏳ Загружается: {pending['name']}\n📁 Папка: {folder}{stats}\n⏳ 0%",
                 call.message.chat.id,
                 call.message.message_id,
             )
@@ -296,12 +355,14 @@ def _callback(bot, call) -> None:
 
     elif data.startswith('reject_'):
         msg_id = int(data[7:])
-        pending = _pending.pop(msg_id, None)
+        with _pending_lock:
+            pending = _pending.pop(msg_id, None)
         if pending:
             try:
                 tr.remove_torrent(pending['torrent_id'], delete_data=False)
             except Exception:
                 pass
+            audit(call.from_user, 'TORRENT_CANCEL', pending['name'])
         bot.answer_callback_query(call.id, 'Загрузка отменена')
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
@@ -333,6 +394,17 @@ def _folder_keyboard(msg_id: int) -> InlineKeyboardMarkup:
         kb.add(InlineKeyboardButton(f'📁 {folder}', callback_data=f'torrent:dest_{msg_id}_{i}'))
     kb.add(InlineKeyboardButton('❌ Отмена', callback_data=f'torrent:reject_{msg_id}'))
     return kb
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
 
 
 def _hash_file(path: str) -> str:
