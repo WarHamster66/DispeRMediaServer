@@ -16,6 +16,15 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
+# Приглушаем спам от временных сетевых сбоев (прокси/Telegram)
+from core.logfilter import TransientNetworkFilter
+
+_noise_filter = TransientNetworkFilter(min_interval=60)
+for _name in ('TeleBot', 'urllib3', 'urllib3.connectionpool'):
+    logging.getLogger(_name).addFilter(_noise_filter)
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_noise_filter)
+
 logger = logging.getLogger(__name__)
 
 # ── bot setup ─────────────────────────────────────────────────────────────────
