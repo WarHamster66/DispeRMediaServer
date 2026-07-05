@@ -388,12 +388,23 @@ def _callback(bot, call) -> None:
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _folder_keyboard(msg_id: int) -> InlineKeyboardMarkup:
-    """Keyboard to choose the destination folder among config.ALLOWED_FOLDERS."""
+    """Keyboard to choose the destination folder, with free space per folder."""
     kb = InlineKeyboardMarkup()
     for i, folder in enumerate(config.ALLOWED_FOLDERS):
-        kb.add(InlineKeyboardButton(f'📁 {folder}', callback_data=f'torrent:dest_{msg_id}_{i}'))
+        path = os.path.join(config.SHARED_FOLDER, folder)
+        try:
+            free = psutil.disk_usage(path).free
+            label = f'📁 {folder} · {_free_h(free)} своб.'
+        except OSError:
+            label = f'📁 {folder}'
+        kb.add(InlineKeyboardButton(label, callback_data=f'torrent:dest_{msg_id}_{i}'))
     kb.add(InlineKeyboardButton('❌ Отмена', callback_data=f'torrent:reject_{msg_id}'))
     return kb
+
+
+def _free_h(n: int) -> str:
+    gb = n / 1024 ** 3
+    return f'{gb / 1024:.1f} ТБ' if gb >= 1024 else f'{gb:.0f} ГБ'
 
 
 def _dir_size(path: str) -> int:
