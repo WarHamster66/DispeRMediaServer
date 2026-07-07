@@ -37,18 +37,23 @@ if config.PROXY_URL:
 
 bot = telebot.TeleBot(config.TOKEN, parse_mode=None)
 
-bot.set_my_commands([
-    telebot.types.BotCommand('/torrent', 'Добавить торрент или magnet-ссылку'),
-    telebot.types.BotCommand('/torrents', 'Активные загрузки'),
-    telebot.types.BotCommand('/pause', 'Пауза торрента'),
-    telebot.types.BotCommand('/resume', 'Возобновить торрент'),
-    telebot.types.BotCommand('/report', 'Отчёт о сервере'),
-    telebot.types.BotCommand('/configure', 'Настроить отчёт'),
-    telebot.types.BotCommand('/media', 'Статистика медиатеки'),
-    telebot.types.BotCommand('/history', 'История загрузок'),
-    telebot.types.BotCommand('/dir', 'Файловый менеджер'),
-    telebot.types.BotCommand('/help', 'Все команды'),
-])
+# Обновление меню команд — это сетевой запрос. Если сеть/прокси недоступны,
+# он НЕ должен ронять бота при старте (иначе systemd крутит краш-луп рестартов).
+try:
+    bot.set_my_commands([
+        telebot.types.BotCommand('/torrent', 'Добавить торрент или magnet-ссылку'),
+        telebot.types.BotCommand('/torrents', 'Активные загрузки'),
+        telebot.types.BotCommand('/pause', 'Пауза торрента'),
+        telebot.types.BotCommand('/resume', 'Возобновить торрент'),
+        telebot.types.BotCommand('/report', 'Отчёт о сервере'),
+        telebot.types.BotCommand('/configure', 'Настроить отчёт'),
+        telebot.types.BotCommand('/media', 'Статистика медиатеки'),
+        telebot.types.BotCommand('/history', 'История загрузок'),
+        telebot.types.BotCommand('/dir', 'Файловый менеджер'),
+        telebot.types.BotCommand('/help', 'Все команды'),
+    ])
+except Exception as e:
+    logger.warning(f'Could not set command menu (нет сети?), продолжаю: {e}')
 
 # ── register handlers ─────────────────────────────────────────────────────────
 from handlers import files, history, reports, system, torrent

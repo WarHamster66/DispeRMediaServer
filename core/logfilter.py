@@ -12,7 +12,10 @@ _TRANSIENT = (
     'Network is unreachable',
     'Max retries exceeded',
     'Read timed out',
-    'Bad Gateway',
+    'Bad Gateway',            # 502
+    'Gateway Time-out',       # 504
+    'Too Many Requests',      # 429
+    'retry after',            # 429 hint
     'Connection aborted',
     'Connection reset',
     'ProxyConnectionError',
