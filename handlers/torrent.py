@@ -301,7 +301,7 @@ def _callback(bot, call) -> None:
             bot.answer_callback_query(call.id, 'Неверные данные')
             return
         with _pending_lock:
-            pending = _pending.pop(msg_id, None)
+            pending = _pending.get(msg_id)
         if not pending:
             bot.answer_callback_query(call.id, 'Запрос устарел')
             bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -309,49 +309,72 @@ def _callback(bot, call) -> None:
         if idx < 0 or idx >= len(config.ALLOWED_FOLDERS):
             bot.answer_callback_query(call.id, 'Папка не найдена')
             return
+
         folder = config.ALLOWED_FOLDERS[idx]
         location = os.path.join(config.SHARED_FOLDER, folder)
-
-        # Проверяем место именно на диске выбранной папки — папки могут
-        # находиться на разных дисках (например, Torrent на SSD, Films на HDD).
-        if pending['size'] and os.path.isdir(location):
-            free = psutil.disk_usage(location).free
-            if free < pending['size']:
-                with _pending_lock:
-                    _pending[msg_id] = pending  # вернуть — пусть выберет другую папку
-                bot.answer_callback_query(
-                    call.id,
-                    f'❌ В «{folder}» мало места: свободно {_fmt(free)}, нужно {_fmt(pending["size"])}',
-                    show_alert=True,
-                )
-                return
-
-        # Статистика папки: сколько уже накачано и сколько влезет ещё
-        stats = ''
-        try:
-            if os.path.isdir(location):
-                used = _dir_size(location)
-                free = psutil.disk_usage(location).free
-                stats = f'\n📁 В «{folder}» уже {_fmt(used)} · свободно {_fmt(free)}'
-        except OSError:
-            pass
+        pending.update({'folder': folder, 'location': location, 'ts': time.time()})
 
         try:
             tr.set_location(pending['torrent_id'], location)
-            tr.mark_active(pending['file_hash'])
-            tr.resume_torrent(pending['torrent_id'])
-            audit(call.from_user, 'TORRENT_START', f"{pending['name']} → {folder}")
-            sent = bot.edit_message_text(
-                f"⏳ Загружается: {pending['name']}\n📁 Папка: {folder}{stats}\n⏳ 0%",
-                call.message.chat.id,
-                call.message.message_id,
-            )
-            tr.start_monitoring(
-                bot, call.message.chat.id, sent.message_id,
-                pending['torrent_id'], pending['file_hash'],
-            )
         except Exception as e:
             bot.answer_callback_query(call.id, f'Ошибка: {e}')
+            return
+
+        # Многофайловый торрент (сезон сериала) — предложить выбрать серии
+        files = tr.get_files(pending['torrent_id'])
+        if len(files) > 1:
+            pending['files'] = files
+            pending['wanted'] = {f['id'] for f in files}
+            pending['page'] = 0
+            bot.edit_message_text(
+                f"📥 {pending['name']}\n📁 Папка: {folder}\n\n"
+                f"Что скачивать? Сними галочки с ненужного:",
+                call.message.chat.id, call.message.message_id,
+                reply_markup=_files_keyboard(msg_id, pending),
+            )
+            return
+
+        _start_download(bot, call, msg_id)
+
+    elif data.startswith('fsel_'):
+        msg_id, file_id = _parse_two(data[len('fsel_'):])
+        pending = _peek(bot, call, msg_id)
+        if pending is None:
+            return
+        wanted = pending.setdefault('wanted', set())
+        wanted.symmetric_difference_update({file_id})  # toggle
+        pending['ts'] = time.time()
+        _refresh_files_kb(bot, call, msg_id, pending)
+
+    elif data.startswith('fall_'):
+        msg_id = int(data[len('fall_'):])
+        pending = _peek(bot, call, msg_id)
+        if pending is None:
+            return
+        pending['wanted'] = {f['id'] for f in pending['files']}
+        pending['ts'] = time.time()
+        _refresh_files_kb(bot, call, msg_id, pending)
+
+    elif data.startswith('fnone_'):
+        msg_id = int(data[len('fnone_'):])
+        pending = _peek(bot, call, msg_id)
+        if pending is None:
+            return
+        pending['wanted'] = set()
+        pending['ts'] = time.time()
+        _refresh_files_kb(bot, call, msg_id, pending)
+
+    elif data.startswith('fpg_'):
+        msg_id, page = _parse_two(data[len('fpg_'):])
+        pending = _peek(bot, call, msg_id)
+        if pending is None:
+            return
+        pending['page'] = page
+        pending['ts'] = time.time()
+        _refresh_files_kb(bot, call, msg_id, pending)
+
+    elif data.startswith('fgo_'):
+        _start_download(bot, call, int(data[len('fgo_'):]))
 
     elif data.startswith('reject_'):
         msg_id = int(data[7:])
@@ -383,6 +406,156 @@ def _callback(bot, call) -> None:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.answer_callback_query(call.id, f'Ошибка: {e}')
+
+
+# ── file selection ────────────────────────────────────────────────────────────
+
+_FILES_PER_PAGE = 15
+
+
+def _parse_two(raw: str) -> tuple[int, int]:
+    """'<msg_id>_<n>' → (msg_id, n)."""
+    a, _, b = raw.rpartition('_')
+    return int(a), int(b)
+
+
+def _peek(bot, call, msg_id: int) -> dict | None:
+    """Получить pending-запрос или сообщить, что он устарел."""
+    with _pending_lock:
+        pending = _pending.get(msg_id)
+    if not pending or 'files' not in pending:
+        bot.answer_callback_query(call.id, 'Запрос устарел')
+        return None
+    return pending
+
+
+def _refresh_files_kb(bot, call, msg_id: int, pending: dict) -> None:
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id, call.message.message_id,
+            reply_markup=_files_keyboard(msg_id, pending),
+        )
+    except Exception:
+        pass  # Telegram ругается, если клавиатура не изменилась
+    bot.answer_callback_query(call.id)
+
+
+def _short(name: str, limit: int = 32) -> str:
+    base = os.path.basename(name)
+    return base if len(base) <= limit else base[:limit - 1] + '…'
+
+
+def _files_keyboard(msg_id: int, pending: dict) -> InlineKeyboardMarkup:
+    """Клавиатура выбора файлов с галочками и постраничным листанием."""
+    files = pending['files']
+    wanted = pending.get('wanted', set())
+    pages = max(1, (len(files) + _FILES_PER_PAGE - 1) // _FILES_PER_PAGE)
+    page = max(0, min(pending.get('page', 0), pages - 1))
+
+    kb = InlineKeyboardMarkup()
+    for f in files[page * _FILES_PER_PAGE:(page + 1) * _FILES_PER_PAGE]:
+        mark = '✅' if f['id'] in wanted else '⬜'
+        kb.add(InlineKeyboardButton(
+            f"{mark} {_short(f['name'])} · {_fmt(f['size'])}",
+            callback_data=f"torrent:fsel_{msg_id}_{f['id']}",
+        ))
+
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton('⬅️', callback_data=f'torrent:fpg_{msg_id}_{page - 1}'))
+        nav.append(InlineKeyboardButton(f'{page + 1}/{pages}', callback_data=f'torrent:fpg_{msg_id}_{page}'))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton('➡️', callback_data=f'torrent:fpg_{msg_id}_{page + 1}'))
+        kb.row(*nav)
+
+    kb.row(
+        InlineKeyboardButton('✅ Все', callback_data=f'torrent:fall_{msg_id}'),
+        InlineKeyboardButton('⬜ Снять все', callback_data=f'torrent:fnone_{msg_id}'),
+    )
+    total = sum(f['size'] for f in files if f['id'] in wanted)
+    kb.add(InlineKeyboardButton(
+        f'▶️ Скачать {len(wanted)} из {len(files)} · {_fmt(total)}',
+        callback_data=f'torrent:fgo_{msg_id}',
+    ))
+    kb.add(InlineKeyboardButton('❌ Отмена', callback_data=f'torrent:reject_{msg_id}'))
+    return kb
+
+
+def _start_download(bot, call, msg_id: int) -> None:
+    """Применить выбор файлов, проверить место и запустить загрузку."""
+    with _pending_lock:
+        pending = _pending.get(msg_id)
+    if not pending or 'location' not in pending:
+        bot.answer_callback_query(call.id, 'Запрос устарел')
+        return
+
+    files = pending.get('files')
+    wanted = pending.get('wanted')
+    folder = pending['folder']
+    location = pending['location']
+
+    if files:
+        if not wanted:
+            bot.answer_callback_query(call.id, 'Не выбран ни один файл', show_alert=True)
+            return
+        need = sum(f['size'] for f in files if f['id'] in wanted)
+        picked = f"\n🎬 Файлов: {len(wanted)} из {len(files)}"
+    else:
+        need = pending['size']
+        picked = ''
+
+    # Место проверяем на диске выбранной папки — папки могут быть на разных дисках
+    try:
+        if need and os.path.isdir(location):
+            free = psutil.disk_usage(location).free
+            if free < need:
+                bot.answer_callback_query(
+                    call.id,
+                    f'❌ В «{folder}» мало места: свободно {_fmt(free)}, нужно {_fmt(need)}',
+                    show_alert=True,
+                )
+                return
+    except OSError:
+        pass
+
+    try:
+        if files:
+            unwanted = [f['id'] for f in files if f['id'] not in wanted]
+            tr.set_files_wanted(pending['torrent_id'], sorted(wanted), unwanted)
+        tr.mark_active(pending['file_hash'])
+        tr.resume_torrent(pending['torrent_id'])
+    except Exception as e:
+        bot.answer_callback_query(call.id, f'Ошибка: {e}')
+        return
+
+    with _pending_lock:
+        _pending.pop(msg_id, None)
+
+    detail = f"{pending['name']} → {folder}"
+    if files:
+        detail += f" ({len(wanted)}/{len(files)} файлов)"
+    audit(call.from_user, 'TORRENT_START', detail)
+
+    stats = ''
+    try:
+        if os.path.isdir(location):
+            stats = (f"\n📁 В «{folder}» уже {_fmt(_dir_size(location))}"
+                     f" · свободно {_fmt(psutil.disk_usage(location).free)}")
+    except OSError:
+        pass
+
+    try:
+        sent = bot.edit_message_text(
+            f"⏳ Загружается: {pending['name']}\n📁 Папка: {folder}{picked}{stats}\n⏳ 0%",
+            call.message.chat.id, call.message.message_id,
+        )
+        tr.start_monitoring(
+            bot, call.message.chat.id, sent.message_id,
+            pending['torrent_id'], pending['file_hash'],
+        )
+    except Exception as e:
+        bot.answer_callback_query(call.id, f'Ошибка: {e}')
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

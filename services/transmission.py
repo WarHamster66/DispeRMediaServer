@@ -87,6 +87,35 @@ def set_location(torrent_id: int, location: str) -> None:
     get_client().move_torrent_data(torrent_id, location)
 
 
+def get_files(torrent_id: int) -> list[dict]:
+    """Files inside a torrent as [{id, name, size}].
+
+    The list index IS the file id used by change_torrent() — see transmission-rpc
+    docs ("the index of file object is the id of the file"). Returns [] for magnets
+    whose metadata has not arrived yet.
+    """
+    try:
+        files = get_client().get_torrent(torrent_id).get_files()
+    except Exception as e:
+        logger.warning(f"Could not read files of torrent {torrent_id}: {e}")
+        return []
+    return [
+        {'id': i,
+         'name': getattr(f, 'name', f'file {i}'),
+         'size': getattr(f, 'size', 0)}
+        for i, f in enumerate(files)
+    ]
+
+
+def set_files_wanted(torrent_id: int, wanted: list[int], unwanted: list[int]) -> None:
+    """Pick which files of a torrent to download (ids are indices from get_files)."""
+    get_client().change_torrent(
+        torrent_id,
+        files_wanted=list(wanted),
+        files_unwanted=list(unwanted),
+    )
+
+
 def get_all_torrents() -> list:
     return get_client().get_torrents()
 
