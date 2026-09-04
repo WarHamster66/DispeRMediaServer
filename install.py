@@ -592,6 +592,58 @@ def step_env(disk: dict, tr: dict) -> dict:
 
 # ── 8. Plex библиотека ─────────────────────────────────────────────────────────
 
+PLEX_PREFS = Path('/var/lib/plexmediaserver/Library/Application Support/'
+                  'Plex Media Server/Preferences.xml')
+
+
+def _plex_token() -> str:
+    """Токен привязанного к аккаунту Plex сервера ('' если не привязан)."""
+    try:
+        m = re.search(r'PlexOnlineToken="([^"]+)"', PLEX_PREFS.read_text(errors='ignore'))
+        return m.group(1) if m else ''
+    except Exception:
+        return ''
+
+
+def _plex_claim():
+    """Привязать сервер к аккаунту Plex.
+
+    Без этого сервер виден только по локальному адресу с ПК, а на телефоне и
+    телевизоре (которые ищут серверы через аккаунт Plex) он НЕ появится.
+    """
+    if _plex_token():
+        ok("Plex уже привязан к аккаунту")
+        return
+
+    print(f"""
+  {BD}Привязка Plex к аккаунту{RS}
+  Без неё сервер не увидят телефон и телевизор — только браузер в этой сети.
+
+  1. Открой на любом устройстве: {B}https://plex.tv/claim{RS}
+  2. Войди в аккаунт Plex (или создай бесплатный)
+  3. Скопируй токен вида {BD}claim-xxxxxxxxxxxx{RS}  {Y}(живёт всего 4 минуты!){RS}
+""")
+    claim = ask("Вставь claim-токен (Enter — привязать позже)", '')
+    if not claim:
+        warn("Пропущено. Привязать позже: https://plex.tv/claim, затем")
+        info('  curl -X POST "http://localhost:32400/myplex/claim?token=claim-XXXX"')
+        return
+    if not claim.startswith('claim-'):
+        warn("Токен должен начинаться с 'claim-' — пропускаю привязку")
+        return
+
+    run(['curl', '-s', '-X', 'POST',
+         f'http://localhost:32400/myplex/claim?token={claim}'], check=False)
+    run(['systemctl', 'restart', 'plexmediaserver'], check=False)
+    time.sleep(5)
+
+    if _plex_token():
+        ok("Plex привязан к аккаунту — сервер появится на телефоне и ТВ")
+    else:
+        warn("Похоже, привязка не удалась (токен мог истечь — он живёт 4 минуты)")
+        info("Повтори позже: https://plex.tv/claim")
+
+
 def step_plex_library(disk: dict):
     hdr(8, "Plex — настройка медиатеки")
 
@@ -599,12 +651,23 @@ def step_plex_library(disk: dict):
         info("Plex не установлен — пропускаем настройку библиотеки")
         return
 
+    _plex_claim()
+
+    # Токен привязанного сервера нужен боту для авто-сканирования библиотеки
+    token = _plex_token()
+    if token:
+        cfg_path = PROJECT_DIR / 'config.json'
+        try:
+            raw = json.loads(cfg_path.read_text(encoding='utf-8'))
+            raw['PLEX_TOKEN'] = token
+            cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=4))
+            ok("PLEX_TOKEN записан в config.json — бот будет сам обновлять медиатеку")
+        except Exception as e:
+            warn(f"Не удалось записать PLEX_TOKEN: {e}")
+
     ip = _local_ip()
     print(f"""
-  Plex запущен. Чтобы добавить медиатеку:
-  1. Открой в браузере: {B}http://{ip}:32400/web{RS}
-  2. Войди в аккаунт Plex (или создай бесплатный)
-  3. Добавь библиотеки:
+  Осталось добавить библиотеки. Открой {B}http://{ip}:32400/web{RS} и создай:
        Фильмы  →  {disk['SHARED_FOLDER']}/Films
        Сериалы →  {disk['SHARED_FOLDER']}/Сериалы
        Мульты  →  {disk['SHARED_FOLDER']}/Мультсериалы
