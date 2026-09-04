@@ -52,6 +52,16 @@ def mark_done(file_hash: str) -> None:
         _active.pop(file_hash, None)
 
 
+def clear_active() -> None:
+    """Сбросить реестр активных загрузок.
+
+    Нужен после /clear_downloads: торренты удалены из Transmission, но реестр
+    в памяти о них ещё «помнит» и не даёт добавить тот же файл заново.
+    """
+    with _active_lock:
+        _active.clear()
+
+
 def add_torrent_file(file_path: str):
     """Add a .torrent file PAUSED and check disk space.
 
@@ -158,6 +168,11 @@ def _monitor_loop(bot, chat_id: int, message_id: int, torrent_id: int, file_hash
             torrent = tc.get_torrent(torrent_id)
             conn_errors = 0
         except Exception as e:
+            # Торрент удалили (например, через /clear_downloads) — мониторить нечего
+            if 'not found' in str(e).lower():
+                logger.info(f"Torrent {torrent_id} removed — monitoring stopped")
+                mark_done(file_hash)
+                return
             # Временный сбой RPC (демон занят записью на диск и т.п.) — не повод
             # бросать мониторинг: ждём и пробуем снова.
             conn_errors += 1

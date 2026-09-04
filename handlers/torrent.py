@@ -162,6 +162,10 @@ def _cmd_clear(bot, message) -> None:
                 tr.remove_torrent(t.id, delete_data=False)
             except Exception as e:
                 logger.error(f"Could not remove torrent {t.name}: {e}")
+        # Сбрасываем реестр активных, иначе те же торренты нельзя будет добавить заново
+        tr.clear_active()
+        with _pending_lock:
+            _pending.clear()
         audit(message.from_user, 'CLEAR_DOWNLOADS', f'{len(torrents)} шт.')
         bot.reply_to(message, f'Удалено {len(torrents)} торрентов из очереди (файлы сохранены).')
     except Exception as e:
@@ -184,8 +188,12 @@ def _handle_torrent_file(bot, message) -> None:
         file_hash = _hash_file(tmp_path)
 
         # Duplicate check — already being monitored in this session
-        if tr.is_active(file_hash):
-            bot.reply_to(message, '⚠️ Этот торрент уже загружается.')
+        if _still_active(file_hash):
+            bot.reply_to(
+                message,
+                '⚠️ Этот торрент уже загружается.\n'
+                'Если это не так — выполни /clear_downloads и отправь снова.',
+            )
             return
 
         # Add paused to Transmission — also checks disk space and existing torrents
@@ -251,8 +259,12 @@ def _handle_magnet(bot, message) -> None:
         return
     magnet = message.text.strip()
     file_hash = hashlib.sha256(magnet.encode()).hexdigest()[:20]
-    if tr.is_active(file_hash):
-        bot.reply_to(message, '⚠️ Этот торрент уже загружается.')
+    if _still_active(file_hash):
+        bot.reply_to(
+            message,
+            '⚠️ Этот торрент уже загружается.\n'
+            'Если это не так — выполни /clear_downloads и отправь снова.',
+        )
         return
     try:
         torrent = tr.add_magnet(magnet)
@@ -411,6 +423,24 @@ def _callback(bot, call) -> None:
 # ── file selection ────────────────────────────────────────────────────────────
 
 _FILES_PER_PAGE = 15
+
+
+def _still_active(file_hash: str) -> bool:
+    """Правда ли торрент ещё качается.
+
+    Реестр активных живёт в памяти и может разойтись с Transmission (например,
+    торренты удалили). Если в Transmission пусто — реестр устарел, чистим его,
+    чтобы файл можно было добавить заново.
+    """
+    if not tr.is_active(file_hash):
+        return False
+    try:
+        if not tr.get_all_torrents():
+            tr.clear_active()
+            return False
+    except Exception:
+        pass  # Transmission недоступен — доверяем реестру
+    return tr.is_active(file_hash)
 
 
 def _parse_two(raw: str) -> tuple[int, int]:
