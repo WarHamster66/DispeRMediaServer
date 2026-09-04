@@ -570,7 +570,12 @@ def step_env(disk: dict, tr: dict) -> dict:
     ])
     env_path.write_text(content)
     env_path.chmod(0o600)   # только owner может читать
-    ok(f".env записан (права 600): {env_path}")
+    # Установщик работает от root, а бот — от обычного пользователя. Без смены
+    # владельца он не сможет прочитать .env (права 600) и упадёт на старте.
+    sudo_user = os.environ.get('SUDO_USER', '')
+    if sudo_user:
+        run(['chown', f'{sudo_user}:{sudo_user}', str(env_path)], check=False)
+    ok(f".env записан (права 600, владелец {sudo_user or 'root'}): {env_path}")
 
     # Обновляем config.json путями к диску и городом
     if cfg_path.exists():
@@ -619,6 +624,11 @@ def step_systemd(env: dict):
 
     sudo_user = os.environ.get('SUDO_USER', '')
     run_user  = ask("Пользователь для запуска бота", sudo_user or 'ubuntu')
+
+    # Установщик работал от root и мог создать файлы (venv, .env, logs/, data/),
+    # недоступные боту. Отдаём весь проект пользователю, от которого он запускается.
+    run(['chown', '-R', f'{run_user}:{run_user}', str(PROJECT_DIR)], check=False)
+    ok(f"Владелец файлов проекта: {run_user}")
 
     svc = f"""[Unit]
 Description=DispeR Media Server Bot
