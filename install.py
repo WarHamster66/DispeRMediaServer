@@ -14,6 +14,9 @@ import sys
 import time
 from pathlib import Path
 
+# Тот же формат значений .env, что пишет бот (только stdlib — работает до venv)
+from core.envfile import quote as env_quote, unquote as env_unquote
+
 # ── ANSI цвета ─────────────────────────────────────────────────────────────────
 R  = '\033[91m'; G  = '\033[92m'; Y  = '\033[93m'; B  = '\033[94m'
 M  = '\033[95m'; C  = '\033[96m'; RS = '\033[0m';  BD = '\033[1m'
@@ -518,7 +521,7 @@ def step_env(disk: dict, tr: dict) -> dict:
         for line in env_path.read_text().splitlines():
             if '=' in line and not line.startswith('#'):
                 k, _, v = line.partition('=')
-                cur[k.strip()] = v.strip()
+                cur[k.strip()] = env_unquote(v)
 
     print(f"\n  {BD}Telegram{RS}")
     print("  Токен — у @BotFather  |  Chat ID и User ID — у @userinfobot\n")
@@ -581,8 +584,8 @@ def step_env(disk: dict, tr: dict) -> dict:
         f'PROXY_URL={cfg["PROXY_URL"]}',
         '',
         '# LostFilm — автоскачивание сериалов по подписке (вход в боте: /lostfilm)',
-        f'LOSTFILM_EMAIL={cfg["LOSTFILM_EMAIL"]}',
-        f'LOSTFILM_PASSWORD={cfg["LOSTFILM_PASSWORD"]}',
+        f'LOSTFILM_EMAIL={env_quote(cfg["LOSTFILM_EMAIL"])}',
+        f'LOSTFILM_PASSWORD={env_quote(cfg["LOSTFILM_PASSWORD"])}',
         '',
     ])
     env_path.write_text(content)
@@ -871,9 +874,14 @@ def step_static_ip():
 
 # ── Итог ───────────────────────────────────────────────────────────────────────
 
-def summary(disk: dict, samba: dict | None = None):
+def summary(disk: dict, samba: dict | None = None, env: dict | None = None):
     ip = _local_ip()
     samba = samba or {'share_name': 'Media', 'smb_user': '—', 'smb_pass': '—'}
+    if (env or {}).get('LOSTFILM_EMAIL'):
+        lostfilm = ('Бот пришлёт в Telegram кнопку «Войти на LostFilm» —\n'
+                    '    нажми и введи код с картинки (или в любой момент: /lostfilm)')
+    else:
+        lostfilm = 'Аккаунт можно указать прямо в боте: /lostfilm (в личке, только админ)'
     print(f"""
 {G}{'═' * 60}{RS}
 {BD}{G}  ✅  Установка завершена!{RS}
@@ -899,6 +907,9 @@ def summary(disk: dict, samba: dict | None = None):
     {disk['SHARED_FOLDER']}/Сериалы
     {disk['SHARED_FOLDER']}/Мультсериалы
     {disk['SHARED_FOLDER']}/Torrent   ← сюда качает Transmission
+
+  {BD}Сериалы с LostFilm:{RS}
+    {lostfilm}
 
   {BD}Если нужно поправить токен/пароль:{RS}
     nano {PROJECT_DIR}/.env
@@ -932,7 +943,7 @@ def main():
     step_plex_library(disk)
     step_systemd(env)
     step_static_ip()
-    summary(disk, samba)
+    summary(disk, samba, env)
 
 
 if __name__ == '__main__':

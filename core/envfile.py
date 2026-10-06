@@ -17,6 +17,15 @@ def quote(value: str) -> str:
     return "'" + value.replace('\\', '\\\\').replace("'", "\\'") + "'"
 
 
+def unquote(value: str) -> str:
+    """Обратно к quote(): прочитать значение из .env без python-dotenv."""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in '\'"':
+        pattern = r"\\([\\'])" if v[0] == "'" else r'\\(.)'
+        return re.sub(pattern, r'\1', v[1:-1])
+    return v
+
+
 def set_values(path: Path, values: dict[str, str], comment: str = '') -> None:
     """Записать ключи в .env. Существующие строки заменяются на месте, новые
     дописываются в конец (с комментарием). Права 600 и владелец сохраняются."""

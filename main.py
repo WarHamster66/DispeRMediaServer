@@ -72,6 +72,7 @@ series.register(bot)
 from scheduler.tasks import start_background_tasks
 
 start_background_tasks(bot)
+series.start_login_reminder(bot)
 
 # ── run ───────────────────────────────────────────────────────────────────────
 logger.info('Bot started. Polling…')

@@ -31,6 +31,27 @@ def register(bot) -> None:
     )
 
 
+def start_login_reminder(bot) -> None:
+    """После запуска (например, сразу после установки): аккаунт указан, а входа
+    нет — прислать админам кнопку «Войти». Саму капчу не шлём: бот принял бы
+    следующее сообщение (magnet, файл) за код с картинки."""
+    _thread(_remind_login, bot, name='LostFilmReminder')
+
+
+def _remind_login(bot) -> None:
+    time.sleep(20)  # даём подняться сети
+    if not lostfilm.is_configured() or lostfilm.logged_in_as():
+        return
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton('🔑 Войти на LostFilm', callback_data='ser:login'))
+    for admin_id in config.ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, f'📺 LostFilm: аккаунт {config.LOSTFILM_EMAIL} указан, но вход '
+                                       'не выполнен — без него сериалы не скачаются.', reply_markup=kb)
+        except Exception as e:
+            logger.warning(f'LostFilm login reminder to {admin_id} failed: {e}')
+
+
 def _thread(target, *args, name: str = 'Series') -> None:
     threading.Thread(target=target, args=args, name=name, daemon=True).start()
 
