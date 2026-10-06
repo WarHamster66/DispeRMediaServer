@@ -119,12 +119,14 @@ def _subscribe(bot, chat_id: int, message_id: int, user, token: str, i: int) -> 
 
     season, episode = (last['season'], last['episode']) if last else (0, 0)
     who = getattr(user, 'username', None) or str(user.id)
-    if not series.subscribe(s, chat_id, season, episode, who):
-        _edit(bot, chat_id, message_id, f'ℹ️ Подписка на «{name}» уже есть. Список: /series')
-        return
-    audit(user, 'SERIES_FOLLOW', s['show'])
-
-    lines = [f'✅ Подписка на «{name}»']
+    is_new = series.subscribe(s, chat_id, season, episode, who)
+    if is_new:
+        audit(user, 'SERIES_FOLLOW', s['show'])
+        lines = [f'✅ Подписка на «{name}»']
+    else:
+        # подписка уже есть — всё равно даём кнопку «скачать»: так можно
+        # забрать последний сезон целиком, не отписываясь
+        lines = [f'ℹ️ Подписка на «{name}» уже есть.']
     kb = None
     if last:
         label = series.code(last['season'], last['episode'])
@@ -140,10 +142,15 @@ def _subscribe(bot, chat_id: int, message_id: int, user, token: str, i: int) -> 
             pick['dl'][i] = dl
         kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton(btn, callback_data=f'ser:dl_{token}_{i}'))
-    else:
+    elif is_new:
         lines.append('Серий пока нет — скачаю первую, как только выйдет.')
-    lines.append(f'\nНовые серии буду качать сам в «{config.SERIES_FOLDER}» '
-                 f'(качество {_quality_text()}) и сообщу сюда.')
+    else:
+        lines.append('Вышедших серий пока нет.')
+    if is_new:
+        lines.append(f'\nНовые серии буду качать сам в «{config.SERIES_FOLDER}» '
+                     f'(качество {_quality_text()}) и сообщу сюда.')
+    else:
+        lines.append('\nСписок подписок: /series')
     if not lostfilm.logged_in_as():
         lines.append('\n' + series.login_hint())
     _edit(bot, chat_id, message_id, '\n'.join(lines), kb)
