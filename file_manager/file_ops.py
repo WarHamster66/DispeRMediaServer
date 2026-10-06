@@ -12,7 +12,7 @@ import shutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
-from file_manager import id_to_path, path_to_id
+from file_manager import id_to_path, is_allowed, is_inside_share, is_valid_name, path_to_id
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +74,12 @@ def _browse_keyboard(path: str, callback_prefix: str, extra_btn: InlineKeyboardB
 
 
 def _is_allowed(path: str) -> bool:
-    if not config.USE_ALLOWED_FOLDERS:
-        return True
-    return any(f for f in config.ALLOWED_FOLDERS if f in path)
+    return is_allowed(path)
 
 
 def _safe_path(new_path: str) -> bool:
     """Prevent path traversal outside SHARED_FOLDER."""
-    return os.path.abspath(new_path).startswith(os.path.abspath(config.SHARED_FOLDER))
+    return is_inside_share(new_path)
 
 
 # ── callback dispatcher ────────────────────────────────────────────────────────
@@ -288,7 +286,10 @@ def _step_create_folder(bot, message) -> None:
     if not state:
         bot.reply_to(message, '⚠️ Сессия истекла, начните заново.')
         return
-    name = message.text.strip()
+    name = (message.text or '').strip()
+    if not is_valid_name(name):
+        bot.reply_to(message, '❌ Недопустимое имя папки (без «/», «..» и т.п.).')
+        return
     new_path = os.path.join(state['path'], name)
     if not _safe_path(new_path):
         bot.reply_to(message, '❌ Недопустимое имя папки.')
@@ -314,7 +315,10 @@ def _step_rename(bot, message, *, is_file: bool) -> None:
         bot.reply_to(message, '⚠️ Сессия истекла, начните заново.')
         return
     old_path = state['path']
-    new_name = message.text.strip()
+    new_name = (message.text or '').strip()
+    if not is_valid_name(new_name):
+        bot.reply_to(message, '❌ Недопустимое имя (без «/», «..» и т.п.).')
+        return
     if is_file:
         ext = os.path.splitext(old_path)[1]
         new_name = new_name + ext if not new_name.endswith(ext) else new_name

@@ -1,20 +1,28 @@
-"""System info commands and /start."""
+"""System info commands, /start, /update and /reboot."""
+import json
 import logging
+import secrets
 import subprocess
-from pathlib import Path
+import threading
+import time
 
 import psutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
 from core.audit import audit, tail as audit_tail
-from core.auth import is_authorized
+from core.auth import is_admin, is_authorized, require_admin
 from services import system_monitor
 
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = 'media-server'
-_UPDATE_FLAG = config.BASE_DIR / 'data' / '.update_notify'
+# Флажок «после перезапуска сообщить в чат». Имя файла прежнее — совместимость.
+_RESTART_FLAG = config.BASE_DIR / 'data' / '.update_notify'
+
+_REBOOT_TTL = 60  # сколько секунд действует кнопка подтверждения перезагрузки
+_reboot_tokens: dict[str, float] = {}
+_reboot_lock = threading.Lock()
 
 
 def register(bot) -> None:
@@ -34,29 +42,78 @@ def register(bot) -> None:
     bot.message_handler(commands=['audit'])(lambda m: _cmd_audit(bot, m))
     bot.message_handler(commands=['disks'])(lambda m: _cmd_disks(bot, m))
     bot.message_handler(commands=['update'])(lambda m: _do_update(bot, m.chat.id, m.from_user.id))
-    bot.callback_query_handler(func=lambda c: c.data == 'sys:update')(lambda c: _cb_update(bot, c))
-    _notify_after_restart(bot)
+    bot.message_handler(commands=['reboot'])(lambda m: _ask_reboot(bot, m.chat.id, m.from_user))
+    bot.callback_query_handler(func=lambda c: c.data.startswith('sys:'))(lambda c: _sys_callback(bot, c))
+
+    # Сообщение «снова в строю» — в фоне, с повторами: после перезагрузки сервера
+    # сеть и прокси поднимаются не мгновенно.
+    threading.Thread(target=_notify_after_restart, args=(bot,),
+                     name='RestartNotify', daemon=True).start()
+
+
+# ── access helpers ────────────────────────────────────────────────────────────
+
+def _admin_gate(bot, chat_id: int, user_id: int) -> bool:
+    """Пропускает только админа; остальным — понятный отказ."""
+    if not is_authorized(user_id):
+        bot.send_message(chat_id, 'Нет доступа.')
+        return False
+    if not require_admin(user_id):
+        bot.send_message(chat_id, '⛔ Эта команда доступна только администратору.')
+        return False
+    return True
+
+
+# ── restart notification ──────────────────────────────────────────────────────
+
+def _write_restart_flag(chat_id: int, kind: str) -> None:
+    try:
+        _RESTART_FLAG.write_text(json.dumps({'chat_id': chat_id, 'kind': kind}))
+    except Exception as e:
+        logger.warning(f'Could not write restart flag: {e}')
+
+
+def _clear_restart_flag() -> None:
+    try:
+        _RESTART_FLAG.unlink()
+    except OSError:
+        pass
 
 
 def _notify_after_restart(bot) -> None:
-    """Если перезапуск был вызван командой /update — сообщить, что бот снова онлайн."""
-    if not _UPDATE_FLAG.exists():
+    """Если перезапуск был вызван /update или /reboot — сообщить, что бот снова онлайн."""
+    if not _RESTART_FLAG.exists():
         return
     try:
-        chat_id = int(_UPDATE_FLAG.read_text().strip())
+        info = json.loads(_RESTART_FLAG.read_text().strip())
+        if isinstance(info, int):  # старый формат флажка: просто chat_id
+            info = {'chat_id': info, 'kind': 'update'}
+        chat_id = int(info['chat_id'])
+    except Exception as e:
+        logger.warning(f'Bad restart flag: {e}')
+        _clear_restart_flag()
+        return
+
+    if info.get('kind') == 'reboot':
+        text = f'✅ Сервер перезагружен и снова в строю.\n{system_monitor.get_uptime()}'
+    else:
         commit = subprocess.run(
             ['git', '-C', str(config.BASE_DIR), 'log', '-1', '--format=%h %s'],
             capture_output=True, text=True,
         ).stdout.strip()
-        bot.send_message(chat_id, f'✅ Обновление применено, бот снова в строю.\n{commit}')
-    except Exception as e:
-        logger.warning(f'Update notify failed: {e}')
-    finally:
-        try:
-            _UPDATE_FLAG.unlink()
-        except OSError:
-            pass
+        text = f'✅ Обновление применено, бот снова в строю.\n{commit}'
 
+    for attempt in range(12):  # до ~3 минут ждём сеть
+        try:
+            bot.send_message(chat_id, text)
+            break
+        except Exception as e:
+            logger.warning(f'Restart notify attempt {attempt + 1} failed: {e}')
+            time.sleep(15)
+    _clear_restart_flag()
+
+
+# ── simple commands ───────────────────────────────────────────────────────────
 
 def _simple(bot, message, fn) -> None:
     if not is_authorized(message.from_user.id):
@@ -69,8 +126,11 @@ def _cmd_start(bot, message) -> None:
     if not is_authorized(message.from_user.id):
         bot.reply_to(message, 'Нет доступа.')
         return
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton('🔄 Обновить медиасервер', callback_data='sys:update'))
+    kb = None
+    if is_admin(message.from_user.id):
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton('🔄 Обновить медиасервер', callback_data='sys:update'))
+        kb.add(InlineKeyboardButton('♻️ Перезагрузить сервер', callback_data='sys:reboot'))
     bot.send_message(
         message.chat.id,
         '👋 Медиасервер онлайн. Используй /help для списка команд.',
@@ -97,15 +157,12 @@ def _cmd_help(bot, message) -> None:
         '/cpu — загрузка CPU\n'
         '/memory — использование RAM\n'
         '/disk — состояние дисков\n'
-        '/wifi — уровень WiFi\n'
-        '/logs — последние системные логи\n'
+        '/disks — подключённые диски и свободное место\n'
+        '/wifi — состояние сети\n'
+        '/logs — последние события бота\n'
         '/export_logs — скачать лог-файл\n'
-        '/clear_logs — очистить лог-файл\n'
         '/scan — пересканировать библиотеку Plex\n'
-        '/backup — сохранить бэкап настроек на сервер\n'
-        '/update — обновить медиасервер с GitHub и перезапустить\n'
-        '/audit — журнал действий (кто что удалил/добавил)\n'
-        '/disks — подключённые диски и свободное место\n\n'
+        '/backup — сохранить бэкап настроек на сервер\n\n'
         '📂 Файлы\n'
         '/dir — просмотр и удаление файлов\n'
         '/dir2 — управление папками\n'
@@ -114,6 +171,14 @@ def _cmd_help(bot, message) -> None:
         '📜 История\n'
         '/history — история загрузок\n'
     )
+    if is_admin(message.from_user.id):
+        text += (
+            '\n👑 Администратор\n'
+            '/reboot — перезагрузить сервер (с подтверждением)\n'
+            '/update — обновить бота с GitHub и перезапустить\n'
+            '/audit — журнал действий (кто что удалил/добавил)\n'
+            '/clear_logs — очистить лог-файл\n'
+        )
     bot.reply_to(message, text)
 
 
@@ -137,8 +202,7 @@ def _cmd_export_logs(bot, message) -> None:
 
 
 def _cmd_clear_logs(bot, message) -> None:
-    if not is_authorized(message.from_user.id):
-        bot.reply_to(message, 'Нет доступа.')
+    if not _admin_gate(bot, message.chat.id, message.from_user.id):
         return
     try:
         open(config.LOG_FILE, 'w').close()
@@ -175,8 +239,7 @@ def _cmd_scan(bot, message) -> None:
 
 def _cmd_audit(bot, message) -> None:
     """Последние записи журнала действий — кто что удалял/добавлял."""
-    if not is_authorized(message.from_user.id):
-        bot.reply_to(message, 'Нет доступа.')
+    if not _admin_gate(bot, message.chat.id, message.from_user.id):
         return
     bot.reply_to(message, f'🕵️ Журнал действий (последние записи):\n\n{audit_tail(15)}')
 
@@ -214,18 +277,122 @@ def _cmd_disks(bot, message) -> None:
     bot.reply_to(message, text)
 
 
-def _cb_update(bot, call) -> None:
+# ── sys:* callbacks ───────────────────────────────────────────────────────────
+
+def _sys_callback(bot, call) -> None:
     if not is_authorized(call.from_user.id):
         bot.answer_callback_query(call.id, 'Нет доступа')
         return
-    bot.answer_callback_query(call.id, 'Запускаю обновление…')
-    _do_update(bot, call.message.chat.id, call.from_user.id)
+    data = call.data[len('sys:'):]
+    chat_id = call.message.chat.id
 
+    if data == 'update':
+        bot.answer_callback_query(call.id)
+        _do_update(bot, chat_id, call.from_user.id)
+    elif data == 'reboot':
+        bot.answer_callback_query(call.id)
+        _ask_reboot(bot, chat_id, call.from_user)
+    elif data.startswith('reboot_yes_'):
+        _confirm_reboot(bot, call, data[len('reboot_yes_'):])
+    elif data == 'reboot_no':
+        bot.answer_callback_query(call.id, 'Отменено')
+        try:
+            bot.edit_message_text('❎ Перезагрузка отменена.', chat_id, call.message.message_id)
+        except Exception:
+            pass
+    else:
+        bot.answer_callback_query(call.id, 'Неизвестное действие')
+
+
+# ── /reboot ───────────────────────────────────────────────────────────────────
+
+def _ask_reboot(bot, chat_id: int, user) -> None:
+    """Шаг 1: спросить подтверждение. Кнопка одноразовая и живёт _REBOOT_TTL секунд."""
+    if not _admin_gate(bot, chat_id, user.id):
+        return
+
+    token = secrets.token_hex(4)
+    now = time.time()
+    with _reboot_lock:
+        for t, exp in list(_reboot_tokens.items()):
+            if exp < now:
+                _reboot_tokens.pop(t, None)
+        _reboot_tokens[token] = now + _REBOOT_TTL
+
+    warn = ''
+    try:
+        from services import transmission as tr
+        n = sum(1 for t in tr.get_all_torrents() if t.status == 'downloading')
+        if n:
+            warn = f'\n⬇️ Сейчас качается: {n} — после перезагрузки загрузки продолжатся сами.'
+    except Exception:
+        pass
+
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton('✅ Да, перезагрузить', callback_data=f'sys:reboot_yes_{token}'),
+        InlineKeyboardButton('❌ Отмена', callback_data='sys:reboot_no'),
+    )
+    bot.send_message(
+        chat_id,
+        f'⚠️ Перезагрузить сервер?\n'
+        f'Бот, Plex, Samba и Transmission будут недоступны 1–2 минуты.{warn}\n\n'
+        f'Кнопка действует {_REBOOT_TTL} сек.',
+        reply_markup=kb,
+    )
+    audit(user, 'REBOOT_REQUEST')
+
+
+def _confirm_reboot(bot, call, token: str) -> None:
+    """Шаг 2: админ подтвердил — перезагружаем."""
+    chat_id = call.message.chat.id
+    if not require_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, '⛔ Только для администратора', show_alert=True)
+        return
+
+    with _reboot_lock:
+        exp = _reboot_tokens.pop(token, 0)
+    if time.time() > exp:
+        bot.answer_callback_query(call.id, 'Подтверждение устарело — запроси /reboot заново',
+                                  show_alert=True)
+        try:
+            bot.edit_message_text('⌛ Подтверждение устарело.', chat_id, call.message.message_id)
+        except Exception:
+            pass
+        return
+
+    bot.answer_callback_query(call.id, 'Перезагружаю…')
+    try:
+        bot.edit_message_text('♻️ Перезагружаю сервер… Напишу, когда вернусь.',
+                              chat_id, call.message.message_id)
+    except Exception:
+        pass
+    audit(call.from_user, 'REBOOT')
+    _write_restart_flag(chat_id, 'reboot')
+
+    # Нужно правило sudoers NOPASSWD на `systemctl reboot` (ставит установщик)
+    try:
+        r = subprocess.run(['sudo', '-n', 'systemctl', 'reboot'],
+                           capture_output=True, text=True, timeout=20)
+        ok, err = r.returncode == 0, (r.stderr or r.stdout).strip()
+    except Exception as e:
+        ok, err = False, str(e)
+
+    if not ok:
+        _clear_restart_flag()
+        logger.error(f'Reboot failed: {err}')
+        bot.send_message(
+            chat_id,
+            f'❌ Не удалось перезагрузить: {err[:300]}\n\n'
+            f'Похоже, нет разрешения sudo — см. README, раздел «Перезагрузка из бота».',
+        )
+
+
+# ── /update ───────────────────────────────────────────────────────────────────
 
 def _do_update(bot, chat_id: int, user_id: int) -> None:
     """git pull + обновление зависимостей + перезапуск сервиса."""
-    if not is_authorized(user_id):
-        bot.send_message(chat_id, 'Нет доступа.')
+    if not _admin_gate(bot, chat_id, user_id):
         return
 
     base = str(config.BASE_DIR)
@@ -261,11 +428,7 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     audit(user_id, 'UPDATE', commit)
     bot.send_message(chat_id, f'✅ Обновлено до:\n{commit}\n\n♻️ Перезапускаюсь…')
 
-    # Оставляем флажок, чтобы после рестарта прислать «бот снова в строю»
-    try:
-        _UPDATE_FLAG.write_text(str(chat_id))
-    except Exception as e:
-        logger.warning(f'Could not write update flag: {e}')
+    _write_restart_flag(chat_id, 'update')
 
     # Перезапуск выполняет systemd (наш процесс при этом завершится).
     # Требуется правило sudoers NOPASSWD на systemctl restart (ставит установщик).

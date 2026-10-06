@@ -28,6 +28,7 @@ def start_background_tasks(bot) -> None:
         (_network_loop, 'NetworkMonitor'),
         (_disk_alert_loop, 'DiskAlertMonitor'),
         (_backup_loop, 'WeeklyBackup'),
+        (_resume_torrents, 'ResumeTorrents'),
     ):
         t = threading.Thread(target=target, args=(bot,), name=name, daemon=True)
         t.start()
@@ -90,10 +91,11 @@ def _report_loop(bot) -> None:
 
 
 def _send_scheduled_report(bot) -> None:
+    from core.textutil import send_long
     from handlers.reports import build_report
     try:
         text = f'🕐 Ежедневный отчёт:\n\n{build_report()}'
-        bot.send_message(config.CHAT_ID, text)
+        send_long(bot, config.CHAT_ID, text)
         logger.info('Daily report sent')
     except Exception as e:
         logger.error(f'Could not send daily report: {e}')
@@ -131,6 +133,18 @@ def _disk_alert_loop(bot) -> None:
         except Exception as e:
             logger.error(f'Disk alert error: {e}', exc_info=True)
         time.sleep(3600)  # check every hour
+
+
+def _resume_torrents(bot) -> None:
+    """Продолжить следить за торрентами, которые качались до перезапуска/перезагрузки."""
+    time.sleep(10)  # даём сети и Transmission подняться после загрузки сервера
+    try:
+        from services import transmission as tr
+        n = tr.resume_monitoring(bot)
+        if n:
+            logger.info(f'Resumed monitoring for {n} torrent(s)')
+    except Exception as e:
+        logger.error(f'Could not resume torrent monitoring: {e}', exc_info=True)
 
 
 def _backup_loop(bot) -> None:

@@ -16,10 +16,19 @@ def _require(key: str) -> str:
     return val
 
 
+def _ids(raw: str) -> list[int]:
+    """'1, 2,3,' → [1, 2, 3] (пробелы и лишние запятые не ломают разбор)."""
+    return [int(p.strip()) for p in raw.split(',') if p.strip()]
+
+
 # Secrets — from .env
 TOKEN: str = _require('TELEGRAM_TOKEN')
 CHAT_ID: int = int(_require('TELEGRAM_CHAT_ID'))
-CREATOR_IDS: list[int] = [int(x.strip()) for x in _require('CREATOR_IDS').split(',')]
+# Доверенные пользователи — могут пользоваться ботом
+CREATOR_IDS: list[int] = _ids(_require('CREATOR_IDS'))
+# Администраторы — дополнительно могут перезагружать сервер, обновлять бота и т.п.
+# По умолчанию — владелец (TELEGRAM_CHAT_ID), если это личный чат, а не группа.
+ADMIN_IDS: list[int] = _ids(os.environ.get('ADMIN_IDS', '')) or ([CHAT_ID] if CHAT_ID > 0 else [])
 TRANSMISSION_HOST: str = _require('TRANSMISSION_HOST')
 TRANSMISSION_PORT: int = int(os.environ.get('TRANSMISSION_PORT', '9091'))
 TRANSMISSION_USER: str = _require('TRANSMISSION_USER')

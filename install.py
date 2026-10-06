@@ -525,7 +525,10 @@ def step_env(disk: dict, tr: dict) -> dict:
 
     token       = ask("Bot Token",                       cur.get('TELEGRAM_TOKEN', ''))
     chat_id     = ask("Chat ID (куда слать отчёты)",    cur.get('TELEGRAM_CHAT_ID', ''))
-    creators    = ask("Creator ID через запятую",       cur.get('CREATOR_IDS', chat_id))
+    creators    = ask("ID доверенных пользователей через запятую (могут пользоваться ботом)",
+                      cur.get('CREATOR_IDS', chat_id))
+    admins      = ask("ID администратора (перезагрузка сервера, обновление — только он)",
+                      cur.get('ADMIN_IDS', chat_id))
 
     print(f"\n  {BD}Погода{RS}")
     print("  Без API-ключа (Open-Meteo). Просто укажи свой город.\n")
@@ -545,6 +548,7 @@ def step_env(disk: dict, tr: dict) -> dict:
         'TELEGRAM_TOKEN':      token,
         'TELEGRAM_CHAT_ID':    chat_id,
         'CREATOR_IDS':         creators,
+        'ADMIN_IDS':           admins,
         'TRANSMISSION_HOST':   tr['TRANSMISSION_HOST'],
         'TRANSMISSION_PORT':   tr['TRANSMISSION_PORT'],
         'TRANSMISSION_USER':   tr['TRANSMISSION_USER'],
@@ -557,6 +561,7 @@ def step_env(disk: dict, tr: dict) -> dict:
         f'TELEGRAM_TOKEN={cfg["TELEGRAM_TOKEN"]}',
         f'TELEGRAM_CHAT_ID={cfg["TELEGRAM_CHAT_ID"]}',
         f'CREATOR_IDS={cfg["CREATOR_IDS"]}',
+        f'ADMIN_IDS={cfg["ADMIN_IDS"]}',
         '',
         '# Transmission RPC',
         f'TRANSMISSION_HOST={cfg["TRANSMISSION_HOST"]}',
@@ -687,6 +692,9 @@ def step_systemd(env: dict):
 
     sudo_user = os.environ.get('SUDO_USER', '')
     run_user  = ask("Пользователь для запуска бота", sudo_user or 'ubuntu')
+    while run(['id', run_user], check=False, capture=True).returncode != 0:
+        warn(f"Пользователя «{run_user}» нет в системе")
+        run_user = ask("Пользователь для запуска бота", sudo_user or 'ubuntu')
 
     # Установщик работал от root и мог создать файлы (venv, .env, logs/, data/),
     # недоступные боту. Отдаём весь проект пользователю, от которого он запускается.
@@ -716,14 +724,23 @@ WantedBy=multi-user.target
     run(['systemctl', 'daemon-reload'])
     run(['systemctl', 'enable', SERVICE_NAME])
 
-    # Разрешаем боту перезапускать себя без пароля — для команды /update
+    # Разрешаем боту без пароля ровно две вещи: перезапуск себя (/update)
+    # и перезагрузку сервера (/reboot, только для админа в Telegram).
     systemctl = shutil.which('systemctl') or '/usr/bin/systemctl'
-    sudoers = Path('/etc/sudoers.d/media-server')
-    sudoers.write_text(
-        f'{run_user} ALL=(root) NOPASSWD: {systemctl} restart {SERVICE_NAME}\n'
-    )
-    sudoers.chmod(0o440)
-    ok("Боту разрешён перезапуск через /update (sudoers)")
+    rule = (f'{run_user} ALL=(root) NOPASSWD: '
+            f'{systemctl} restart {SERVICE_NAME}, {systemctl} reboot\n')
+    # Сначала пишем во временный файл и проверяем visudo: битый файл в
+    # /etc/sudoers.d ломает sudo целиком. Файлы с точкой в имени sudo игнорирует,
+    # поэтому временный файл безопасен.
+    tmp = Path('/etc/sudoers.d/.media-server.tmp')
+    tmp.write_text(rule)
+    tmp.chmod(0o440)
+    if run(['visudo', '-cf', str(tmp)], check=False, capture=True).returncode == 0:
+        tmp.replace(Path('/etc/sudoers.d/media-server'))
+        ok("Боту разрешены /update и /reboot (sudoers, проверено visudo)")
+    else:
+        tmp.unlink(missing_ok=True)
+        warn("Правило sudoers не прошло проверку visudo — /update и /reboot работать не будут")
 
     if env.get('TELEGRAM_TOKEN') and env.get('TELEGRAM_CHAT_ID'):
         run(['systemctl', 'restart', SERVICE_NAME])

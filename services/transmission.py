@@ -2,10 +2,12 @@
 
 Uses the maintained `transmission-rpc` library (Transmission 3.0 / 4.0 compatible).
 """
+import json
 import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 import psutil
 from transmission_rpc import Client
@@ -18,6 +20,12 @@ logger = logging.getLogger(__name__)
 # Tracks in-progress torrents: {file_hash: True}
 _active: dict[str, bool] = {}
 _active_lock = threading.Lock()
+
+# Торренты, за которыми следит бот, сохраняются на диск — чтобы после
+# перезагрузки сервера или /update продолжить следить и прислать «🏁 сохранён».
+# Ключ — hashString (числовые id Transmission меняются после рестарта демона).
+_WATCH_FILE = Path(config.HISTORY_FILE).parent / 'active_torrents.json'
+_watch_lock = threading.Lock()
 
 
 class InsufficientSpaceError(Exception):
@@ -60,6 +68,82 @@ def clear_active() -> None:
     """
     with _active_lock:
         _active.clear()
+    with _watch_lock:
+        _save_watch({})
+
+
+# ── persistent watch list ─────────────────────────────────────────────────────
+
+def _load_watch() -> dict:
+    try:
+        return json.loads(_WATCH_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_watch(data: dict) -> None:
+    try:
+        tmp = _WATCH_FILE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(_WATCH_FILE)  # атомарно — файл не побьётся при внезапном выключении
+    except Exception as e:
+        logger.warning(f'Could not save watch list: {e}')
+
+
+def _watch_add(key: str, chat_id: int, file_hash: str, name: str) -> None:
+    with _watch_lock:
+        data = _load_watch()
+        data[key] = {'chat_id': chat_id, 'file_hash': file_hash, 'name': name}
+        _save_watch(data)
+
+
+def _watch_remove(key) -> None:
+    with _watch_lock:
+        data = _load_watch()
+        if data.pop(str(key), None) is not None:
+            _save_watch(data)
+
+
+def resume_monitoring(bot) -> int:
+    """После старта бота продолжить следить за недокачанными торрентами."""
+    with _watch_lock:
+        watch = _load_watch()
+    for key, info in watch.items():
+        chat_id = info.get('chat_id') or config.CHAT_ID
+        file_hash = info.get('file_hash') or key
+        mark_active(file_hash)
+        message_id = None
+        try:
+            sent = bot.send_message(chat_id, f"🔄 После перезапуска продолжаю следить: {info.get('name', key)}")
+            message_id = sent.message_id
+        except Exception as e:
+            logger.warning(f'Resume notify failed: {e}')
+        start_monitoring(bot, chat_id, message_id, key, file_hash)
+    return len(watch)
+
+
+def _hash_of(torrent) -> str:
+    return getattr(torrent, 'hashString', None) or getattr(torrent, 'hash_string', '') or ''
+
+
+def _wanted_size(torrent) -> int:
+    """Размер выбранных файлов (с учётом выбора серий), иначе полный размер."""
+    return getattr(torrent, 'size_when_done', 0) or torrent.total_size
+
+
+def _is_complete(torrent) -> bool:
+    if torrent.status == 'seeding':
+        return True
+    # Скачан целиком, но стоит на паузе (например, поставили паузу на 100%)
+    done = getattr(torrent, 'percent_done', 0) or 0
+    return torrent.status == 'stopped' and done >= 1.0 and _wanted_size(torrent) > 0
+
+
+def _safe_send(bot, chat_id: int, text: str) -> None:
+    try:
+        bot.send_message(chat_id, text)
+    except Exception as e:
+        logger.warning(f'send_message failed: {e}')
 
 
 def add_torrent_file(file_path: str):
@@ -142,8 +226,12 @@ def remove_torrent(torrent_id: int, delete_data: bool = False) -> None:
     get_client().remove_torrent(torrent_id, delete_data=delete_data)
 
 
-def start_monitoring(bot, chat_id: int, message_id: int, torrent_id: int, file_hash: str) -> None:
-    """Start a daemon thread that monitors torrent progress and edits the status message."""
+def start_monitoring(bot, chat_id: int, message_id: int | None, torrent_id, file_hash: str) -> None:
+    """Start a daemon thread that monitors torrent progress and edits the status message.
+
+    torrent_id — числовой id или hashString. message_id может быть None
+    (тогда прогресс не редактируется, приходят только итоговые сообщения).
+    """
     t = threading.Thread(
         target=_monitor_loop,
         args=(bot, chat_id, message_id, torrent_id, file_hash),
@@ -152,123 +240,146 @@ def start_monitoring(bot, chat_id: int, message_id: int, torrent_id: int, file_h
     t.start()
 
 
-def _monitor_loop(bot, chat_id: int, message_id: int, torrent_id: int, file_hash: str) -> None:
-    """Monitor torrent using a while loop (no recursion — fixes stack overflow on long downloads)."""
+def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_hash: str) -> None:
+    """Следит за торрентом, пока он не докачается или его не удалят.
+
+    Мониторинг больше не «сдаётся»: при долгом отсутствии прогресса или
+    недоступности Transmission он один раз предупреждает и продолжает
+    проверять раз в 10 минут — чтобы гарантированно поймать завершение.
+    """
     intervals = [10, 60, 300, 600]
     interval_idx = 0
     stall_count = 0
     max_stalls = 4
     prev_progress = -1
     conn_errors = 0
-    max_conn_errors = 10  # ~5 минут недоступности демона подряд
+    stall_notified = False
+    conn_notified = False
+    key = torrent_id  # после первого ответа заменим на стабильный hashString
 
     while True:
         try:
             tc = get_client()
-            torrent = tc.get_torrent(torrent_id)
+            torrent = tc.get_torrent(key)
             conn_errors = 0
         except Exception as e:
             # Торрент удалили (например, через /clear_downloads) — мониторить нечего
             if 'not found' in str(e).lower():
-                logger.info(f"Torrent {torrent_id} removed — monitoring stopped")
+                logger.info(f"Torrent {key} removed — monitoring stopped")
+                _watch_remove(key)
                 mark_done(file_hash)
                 return
-            # Временный сбой RPC (демон занят записью на диск и т.п.) — не повод
-            # бросать мониторинг: ждём и пробуем снова.
+            # Временный сбой RPC (демон занят записью на диск и т.п.) — ждём
             conn_errors += 1
-            logger.warning(
-                f"Monitor: RPC error {conn_errors}/{max_conn_errors} "
-                f"for torrent {torrent_id}: {e}"
-            )
-            if conn_errors >= max_conn_errors:
-                logger.error(f"Monitor gave up on torrent {torrent_id}: {e}")
-                bot.send_message(
-                    chat_id,
-                    f"⚠️ Transmission не отвечает уже {max_conn_errors} попыток — "
-                    f"мониторинг остановлен. Загрузка продолжается, проверь /torrents",
-                )
-                mark_done(file_hash)
-                return
-            time.sleep(30)
+            logger.warning(f"Monitor: RPC error #{conn_errors} for torrent {key}: {e}")
+            if conn_errors == 10 and not conn_notified:
+                conn_notified = True
+                _safe_send(bot, chat_id,
+                           "⚠️ Transmission не отвечает ~5 минут. Продолжаю следить "
+                           "за загрузкой — проверь /torrents")
+            time.sleep(30 if conn_errors < 10 else 300)
             continue
 
+        hs = _hash_of(torrent)
+        if hs and key != hs:
+            key = hs
+            _watch_add(hs, chat_id, file_hash, torrent.name)
+
         try:
-            if torrent.status == 'seeding':
+            if _is_complete(torrent):
                 _on_complete(bot, chat_id, message_id, torrent, file_hash, tc)
                 return
 
+            size = _wanted_size(torrent)
             progress = int(torrent.progress)
             text = (
                 f"⏳ {torrent.name}\n"
-                f"📦 Размер: {_fmt_size(torrent.total_size)}\n"
-                f"⬇️ {_fmt_size(int(torrent.total_size * torrent.progress / 100))} / "
-                f"{_fmt_size(torrent.total_size)} ({progress}%)\n"
+                f"📦 Размер: {_fmt_size(size)}\n"
+                f"⬇️ {_fmt_size(int(size * torrent.progress / 100))} / "
+                f"{_fmt_size(size)} ({progress}%)\n"
                 f"🚀 Загрузка: {_fmt_speed(torrent.rate_download)}  "
                 f"📤 Отдача: {_fmt_speed(torrent.rate_upload)}"
             )
 
             if progress != prev_progress:
-                try:
-                    bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-                except Exception:
-                    pass
+                if message_id is not None:
+                    try:
+                        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+                    except Exception:
+                        pass
                 prev_progress = progress
                 interval_idx = 0
                 stall_count = 0
+                stall_notified = False
             else:
                 stall_count += 1
                 if stall_count >= max_stalls:
+                    stall_count = 0
                     if interval_idx < len(intervals) - 1:
                         interval_idx += 1
-                        stall_count = 0
                         logger.info(f"[{torrent.name}] No progress — checking every {intervals[interval_idx]}s")
-                    else:
-                        bot.send_message(chat_id, f"❌ {torrent.name}: нет прогресса, мониторинг остановлен")
-                        mark_done(file_hash)
-                        return
+                    elif not stall_notified:
+                        stall_notified = True
+                        _safe_send(bot, chat_id,
+                                   f"🐢 {torrent.name}: давно нет прогресса (мало раздающих "
+                                   f"или нет сети). Продолжаю следить — напишу, когда докачается.")
 
         except Exception as e:
-            logger.error(f"Error in monitor loop for torrent {torrent_id}: {e}")
+            logger.error(f"Error in monitor loop for torrent {key}: {e}")
 
         time.sleep(intervals[interval_idx])
 
 
-def _on_complete(bot, chat_id: int, message_id: int, torrent, file_hash: str, tc) -> None:
+def _on_complete(bot, chat_id: int, message_id: int | None, torrent, file_hash: str, tc) -> None:
+    """Завершение: убрать из Transmission, записать в историю, обновить Plex, сообщить.
+
+    Важные действия идут ДО уведомлений — если Telegram недоступен,
+    история и Plex всё равно обновятся.
+    """
     name = torrent.name
+    size = _wanted_size(torrent)
+    dl_dir = torrent.download_dir
     try:
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                f"✅ Загружено: {name}\n"
-                f"📦 Размер: {_fmt_size(torrent.total_size)}\n"
-                f"⬆️ Отдано: {_fmt_size(torrent.uploaded_ever)}"
-            ),
-        )
-        tc.remove_torrent(torrent.id, delete_data=False)
+        try:
+            tc.remove_torrent(torrent.id, delete_data=False)
+        except Exception as e:
+            logger.warning(f"Could not remove completed torrent {name}: {e}")
+        record_download(name, size, dl_dir)
+        logger.info(f"Torrent completed: {name}")
+
+        # Просим Plex пересканировать библиотеку, чтобы файл сразу появился
+        from services import plex
+        plex.refresh_libraries_safe()
+
+        if message_id is not None:
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=(
+                        f"✅ Загружено: {name}\n"
+                        f"📦 Размер: {_fmt_size(size)}\n"
+                        f"⬆️ Отдано: {_fmt_size(torrent.uploaded_ever)}"
+                    ),
+                )
+            except Exception:
+                pass
 
         # Статистика папки: сколько в ней уже занято и сколько свободно на диске
         stats = ''
         try:
-            dl_dir = torrent.download_dir
             used = _dir_size(dl_dir)
             free = psutil.disk_usage(dl_dir).free
             folder_name = os.path.basename(dl_dir.rstrip('/'))
             stats = f"\n📁 В «{folder_name}» теперь {_fmt_size(used)} · свободно {_fmt_size(free)}"
         except Exception:
             pass
-
-        bot.send_message(chat_id, f"🏁 {name} сохранён в {torrent.download_dir}{stats}")
-        record_download(name, torrent.total_size, torrent.download_dir)
-        logger.info(f"Torrent completed: {name}")
-
-        # Просим Plex пересканировать библиотеку, чтобы файл сразу появился
-        from services import plex
-        plex.refresh_libraries_safe()
+        _safe_send(bot, chat_id, f"🏁 {name} сохранён в {dl_dir}{stats}")
     except Exception as e:
         logger.error(f"Error handling completed torrent {name}: {e}")
-        bot.send_message(chat_id, f"⚠️ Ошибка при завершении загрузки: {e}")
+        _safe_send(bot, chat_id, f"⚠️ Ошибка при завершении загрузки: {e}")
     finally:
+        _watch_remove(_hash_of(torrent))
         mark_done(file_hash)
 
 

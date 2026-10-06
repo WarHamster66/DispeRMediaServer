@@ -19,11 +19,19 @@ _state: dict = {
     'total_bytes_sent': 0,
 }
 
-_MAX_HISTORY = 720  # ~30 days at 1-hour saves
+# Сохраняем каждые 15 минут → 4 записи в час. Храним чуть больше 30 дней,
+# иначе статистика «30 д» физически не может посчитаться.
+_MAX_HISTORY = 31 * 24 * 4
 
 
 def _load_initial_state() -> None:
     """Restore totals AND last counters from the most recent saved entry."""
+    # Seed last_* with the OS counters as they stand right now so the first
+    # save_network_data() call produces a zero-diff instead of adding all the
+    # traffic since boot (in particular on the very first run without history).
+    net = psutil.net_io_counters()
+    _state['last_bytes_recv'] = net.bytes_recv
+    _state['last_bytes_sent'] = net.bytes_sent
     if not os.path.exists(config.NETWORK_FILE):
         return
     try:
@@ -32,11 +40,6 @@ def _load_initial_state() -> None:
         if not history:
             return
         last = history[-1]
-        # Seed last_* with the OS counters as they stand right now so the first
-        # save_network_data() call produces a zero-diff instead of adding boot traffic.
-        net = psutil.net_io_counters()
-        _state['last_bytes_recv'] = net.bytes_recv
-        _state['last_bytes_sent'] = net.bytes_sent
         _state['total_bytes_recv'] = last['bytes_recv']
         _state['total_bytes_sent'] = last['bytes_sent']
     except Exception as e:
@@ -108,14 +111,18 @@ def get_network_usage() -> str:
         def gb(v: int) -> str:
             return f"{v / 1024 ** 3:.2f} GB"
 
-        recv_day = current['bytes_recv'] - (day_entry['bytes_recv'] if day_entry else 0)
-        recv_month = current['bytes_recv'] - (month_entry['bytes_recv'] if month_entry else 0)
+        # Если данных за период ещё нет — считаем от самой первой записи
+        day_base = day_entry or history[0]
+        month_base = month_entry or history[0]
+
+        def delta(base: dict, key: str) -> int:
+            return max(0, current[key] - base[key])
 
         return (
             f"📊 Трафик:\n"
-            f"┌ Сессия: {gb(current['bytes_recv'])} ▼ / {gb(current['bytes_sent'])} ▲\n"
-            f"├ 24 ч:   {gb(recv_day)} ▼\n"
-            f"└ 30 д:   {gb(recv_month)} ▼"
+            f"┌ Всего:  {gb(current['bytes_recv'])} ▼ / {gb(current['bytes_sent'])} ▲\n"
+            f"├ 24 ч:   {gb(delta(day_base, 'bytes_recv'))} ▼ / {gb(delta(day_base, 'bytes_sent'))} ▲\n"
+            f"└ 30 д:   {gb(delta(month_base, 'bytes_recv'))} ▼ / {gb(delta(month_base, 'bytes_sent'))} ▲"
         )
     except Exception as e:
         logger.error(f"Error reading network usage: {e}")

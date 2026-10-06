@@ -8,6 +8,7 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
 from core.auth import is_authorized
+from core.textutil import send_long
 from services import (
     internet_speed,
     network_tracker,
@@ -123,14 +124,9 @@ def _cmd_report(bot, message) -> None:
         bot.reply_to(message, 'Нет доступа.')
         return
     bot.send_chat_action(message.chat.id, 'typing')
-    text = build_report()
-    # Escape MarkdownV2 reserved chars
-    for ch in r'\-=_*[]()~`>#+=|{}.!':
-        text = text.replace(ch, f'\\{ch}')
-    try:
-        bot.reply_to(message, text, parse_mode='MarkdownV2')
-    except Exception:
-        bot.reply_to(message, build_report())  # fallback without markdown
+    # Строим один раз (speedtest/погода — медленные) и шлём обычным текстом,
+    # разбивая на части, если отчёт длиннее лимита Telegram.
+    send_long(bot, message.chat.id, build_report(), reply_to=message.message_id)
 
 
 def _cmd_configure(bot, message) -> None:

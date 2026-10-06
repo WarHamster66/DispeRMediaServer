@@ -6,7 +6,7 @@ import shutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
-from file_manager import id_to_path, path_to_id
+from file_manager import id_to_path, is_allowed, is_inside_share, path_to_id
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _build_keyboard(path: str) -> InlineKeyboardMarkup:
 
 
 def _is_allowed(path: str) -> bool:
-    return any(f for f in config.ALLOWED_FOLDERS if f in path)
+    return is_allowed(path)
 
 
 def _is_protected(path: str) -> bool:
@@ -128,6 +128,12 @@ def _handle(bot, call) -> None:
             return
         if not os.path.isdir(path):
             bot.answer_callback_query(call.id, 'Папка не найдена')
+            return
+        # Нельзя удалить корень шары и точки монтирования (за ними — целый диск)
+        if (not is_inside_share(path)
+                or os.path.realpath(path) == os.path.realpath(config.SHARED_FOLDER)
+                or os.path.ismount(path)):
+            bot.answer_callback_query(call.id, 'Эту папку удалить нельзя')
             return
         try:
             shutil.rmtree(path)

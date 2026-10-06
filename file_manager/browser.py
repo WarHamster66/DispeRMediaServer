@@ -5,7 +5,7 @@ import os
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
-from file_manager import id_to_path, path_to_id
+from file_manager import id_to_path, is_allowed, is_inside_share, path_to_id
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def _build_keyboard(path: str) -> InlineKeyboardMarkup:
 
 
 def _is_allowed(path: str) -> bool:
-    return any(f for f in config.ALLOWED_FOLDERS if f in path)
+    return is_allowed(path)
 
 
 # ── callback dispatcher ────────────────────────────────────────────────────────
@@ -122,6 +122,9 @@ def _handle(bot, call) -> None:
             return
         if not os.path.isfile(path):
             bot.answer_callback_query(call.id, 'Файл не найден')
+            return
+        if not is_inside_share(path):
+            bot.answer_callback_query(call.id, 'Недопустимый путь')
             return
         try:
             size = os.path.getsize(path)

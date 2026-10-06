@@ -124,11 +124,20 @@ def get_last_logs(lines: int = 8) -> str:
 
 
 def get_services_status() -> str:
-    raw = subprocess.getoutput(
-        "systemctl list-units --type=service --state=running | awk '{print $1 \" - \" $3}'"
-    )
-    lines = [l for l in raw.splitlines() if any(s in l for s in config.CUSTOM_SERVICES)]
-    return '\n'.join(lines) if lines else 'Нет запущенных отслеживаемых служб'
+    """Статус каждой отслеживаемой службы — включая упавшие (их важнее всего видеть)."""
+    lines = []
+    for svc in config.CUSTOM_SERVICES:
+        state = subprocess.run(
+            ['systemctl', 'is-active', svc], capture_output=True, text=True,
+        ).stdout.strip() or 'unknown'
+        if state == 'active':
+            icon = '✅'
+        elif state in ('activating', 'reloading'):
+            icon = '⏳'
+        else:
+            icon = '❌'
+        lines.append(f'{icon} {svc} — {state}')
+    return '\n'.join(lines) if lines else 'Нет отслеживаемых служб'
 
 
 def get_media_stats() -> str:
