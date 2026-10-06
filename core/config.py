@@ -68,6 +68,13 @@ LOSTFILM_EMAIL: str = os.environ.get('LOSTFILM_EMAIL', '')
 LOSTFILM_PASSWORD: str = os.environ.get('LOSTFILM_PASSWORD', '')
 LOSTFILM_URL: str = _raw.get('LOSTFILM_URL', '')                  # пусто — первое рабочее зеркало
 SERIES_FOLDER: str = _raw.get('SERIES_FOLDER', 'Сериалы')         # куда качать новые серии
+
+# Поиск по RuTracker (логин и пароль — секрет, лежат в .env). Сайт закрыт
+# проверкой Cloudflare — её проходит FlareSolverr (ставит setup_rutracker.py)
+RUTRACKER_USER: str = os.environ.get('RUTRACKER_USER', '')
+RUTRACKER_PASSWORD: str = os.environ.get('RUTRACKER_PASSWORD', '')
+RUTRACKER_URL: str = _raw.get('RUTRACKER_URL', 'https://rutracker.org/')
+FLARESOLVERR_URL: str = _raw.get('FLARESOLVERR_URL', 'http://127.0.0.1:8191')
 SERIES_QUALITY: str = _raw.get('SERIES_QUALITY', '1080')          # предпочитаемое качество
 SERIES_CHECK_MINUTES: int = int(_raw.get('SERIES_CHECK_MINUTES', 30))
 

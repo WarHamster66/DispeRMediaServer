@@ -30,7 +30,7 @@ SERVICE_FILE = Path(f'/etc/systemd/system/{SERVICE_NAME}.service')
 TR_SETTINGS  = Path('/etc/transmission-daemon/settings.json')
 SAMBA_CONF   = Path('/etc/samba/smb.conf')
 MEDIA_DIRS   = ['Сериалы', 'Мультсериалы', 'Films', 'Torrent']
-TOTAL        = 10
+TOTAL        = 11
 
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
@@ -553,6 +553,13 @@ def step_env(disk: dict, tr: dict) -> dict:
     lf_pass     = (ask_secret("Пароль LostFilm (Enter — оставить прежний)", cur.get('LOSTFILM_PASSWORD', ''))
                    if lf_email else '')
 
+    print(f"\n  {BD}RuTracker (необязательно){RS}")
+    print("  Аккаунт rutracker.org — поиск фильмов и сериалов прямо в боте.\n"
+          "  Можно пропустить и указать потом в боте: /rutracker\n")
+    rt_user     = ask("Логин на RuTracker (Enter — пропустить)", cur.get('RUTRACKER_USER', ''))
+    rt_pass     = (ask_secret("Пароль RuTracker (Enter — оставить прежний)", cur.get('RUTRACKER_PASSWORD', ''))
+                   if rt_user else '')
+
     cfg = {
         'TELEGRAM_TOKEN':      token,
         'TELEGRAM_CHAT_ID':    chat_id,
@@ -565,6 +572,8 @@ def step_env(disk: dict, tr: dict) -> dict:
         'PROXY_URL':           proxy,
         'LOSTFILM_EMAIL':      lf_email,
         'LOSTFILM_PASSWORD':   lf_pass,
+        'RUTRACKER_USER':      rt_user,
+        'RUTRACKER_PASSWORD':  rt_pass,
     }
 
     content = '\n'.join([
@@ -586,6 +595,10 @@ def step_env(disk: dict, tr: dict) -> dict:
         '# LostFilm — автоскачивание сериалов по подписке (вход в боте: /lostfilm)',
         f'LOSTFILM_EMAIL={env_quote(cfg["LOSTFILM_EMAIL"])}',
         f'LOSTFILM_PASSWORD={env_quote(cfg["LOSTFILM_PASSWORD"])}',
+        '',
+        '# RuTracker — поиск раздач в боте (вход: /rutracker)',
+        f'RUTRACKER_USER={env_quote(cfg["RUTRACKER_USER"])}',
+        f'RUTRACKER_PASSWORD={env_quote(cfg["RUTRACKER_PASSWORD"])}',
         '',
     ])
     env_path.write_text(content)
@@ -700,10 +713,27 @@ def step_plex_library(disk: dict):
     ok("Plex добавлен в группу для чтения медиапапки")
 
 
-# ── 9. Systemd сервис ──────────────────────────────────────────────────────────
+# ── 9. Поиск по RuTracker (FlareSolverr в Docker) ──────────────────────────────
+
+def step_rutracker(env: dict) -> bool:
+    hdr(9, "Поиск по RuTracker")
+    print("  RuTracker закрыт проверкой Cloudflare «я не робот». Её проходит\n"
+          "  FlareSolverr — настоящий браузер в Docker (~1 ГБ на диске, ~60 МБ памяти).\n"
+          "  Бот обращается к нему изредка, а ищет и качает обычными быстрыми запросами.\n")
+    if not ask_bool("Включить поиск по RuTracker?", bool(env.get('RUTRACKER_USER'))):
+        info("Пропущено. Включить позже:  sudo python3 setup_rutracker.py")
+        return False
+    import setup_rutracker
+    if setup_rutracker.install():
+        return True
+    warn("Повторить позже:  sudo python3 setup_rutracker.py")
+    return False
+
+
+# ── 10. Systemd сервис ─────────────────────────────────────────────────────────
 
 def step_systemd(env: dict):
-    hdr(9, "Systemd автозапуск")
+    hdr(10, "Systemd автозапуск")
 
     sudo_user = os.environ.get('SUDO_USER', '')
     run_user  = ask("Пользователь для запуска бота", sudo_user or 'ubuntu')
@@ -771,7 +801,7 @@ WantedBy=multi-user.target
         info(f"После заполнения .env запусти:  systemctl start {SERVICE_NAME}")
 
 
-# ── 10. Статический IP ──────────────────────────────────────────────────────────
+# ── 11. Статический IP ──────────────────────────────────────────────────────────
 
 def _detect_network() -> dict:
     """Активный интерфейс, текущий IP/префикс и шлюз."""
@@ -833,7 +863,7 @@ def _apply_static_netplan(iface, ip_, prefix, gw, dns):
 
 
 def step_static_ip():
-    hdr(10, "Статический IP (рекомендуется)")
+    hdr(11, "Статический IP (рекомендуется)")
     net = _detect_network()
     if not net['iface'] or not net['ip']:
         warn("Не удалось определить сеть — пропускаю настройку IP")
@@ -874,7 +904,8 @@ def step_static_ip():
 
 # ── Итог ───────────────────────────────────────────────────────────────────────
 
-def summary(disk: dict, samba: dict | None = None, env: dict | None = None):
+def summary(disk: dict, samba: dict | None = None, env: dict | None = None,
+            rutracker_ready: bool = False):
     ip = _local_ip()
     samba = samba or {'share_name': 'Media', 'smb_user': '—', 'smb_pass': '—'}
     if (env or {}).get('LOSTFILM_EMAIL'):
@@ -882,6 +913,12 @@ def summary(disk: dict, samba: dict | None = None, env: dict | None = None):
                     '    нажми и введи код с картинки (или в любой момент: /lostfilm)')
     else:
         lostfilm = 'Аккаунт можно указать прямо в боте: /lostfilm (в личке, только админ)'
+    if rutracker_ready:
+        rutracker = ('Бот пришлёт кнопку «Войти на RuTracker» (или /rutracker),\n'
+                     '    потом просто пиши боту название фильма')
+    else:
+        rutracker = ('Включить: sudo python3 setup_rutracker.py, затем в боте /rutracker\n'
+                     '    (логин и пароль — в личке, только админ)')
     print(f"""
 {G}{'═' * 60}{RS}
 {BD}{G}  ✅  Установка завершена!{RS}
@@ -907,6 +944,9 @@ def summary(disk: dict, samba: dict | None = None, env: dict | None = None):
     {disk['SHARED_FOLDER']}/Сериалы
     {disk['SHARED_FOLDER']}/Мультсериалы
     {disk['SHARED_FOLDER']}/Torrent   ← сюда качает Transmission
+
+  {BD}Поиск по RuTracker:{RS}
+    {rutracker}
 
   {BD}Сериалы с LostFilm:{RS}
     {lostfilm}
@@ -941,9 +981,10 @@ def main():
     step_python_env()
     env  = step_env(disk, tr)
     step_plex_library(disk)
+    rt   = step_rutracker(env)
     step_systemd(env)
     step_static_ip()
-    summary(disk, samba, env)
+    summary(disk, samba, env, rt)
 
 
 if __name__ == '__main__':

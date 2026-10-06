@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -197,6 +198,33 @@ def _handle_torrent_file(bot, message) -> None:
                 pass
 
 
+def offer_torrent_bytes(bot, chat_id: int, user, data: bytes, reply_to: int | None = None) -> None:
+    """Предложить скачать .torrent из памяти (например, найденный поиском).
+
+    Дальше всё как для присланного файла: проверка дублей и места, выбор
+    папки, выбор серий.
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix='.torrent')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        _offer_torrent_path(bot, chat_id, user, tmp_path, key=_new_key(), reply_to=reply_to)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _new_key() -> int:
+    """Уникальный ключ для _pending, когда нет исходного сообщения с файлом."""
+    with _pending_lock:
+        while True:
+            key = 10 ** 9 + secrets.randbelow(10 ** 9)
+            if key not in _pending:
+                return key
+
+
 def _offer_torrent_path(bot, chat_id: int, user, tmp_path: str, key: int, reply_to: int | None) -> None:
     file_hash = _hash_file(tmp_path)
 
@@ -263,12 +291,14 @@ def _offer_torrent_path(bot, chat_id: int, user, tmp_path: str, key: int, reply_
 def _handle_magnet(bot, message) -> None:
     if not is_authorized(message.from_user.id):
         return
-    _offer_magnet(bot, message.chat.id, message.from_user, message.text.strip(),
-                  key=message.message_id, reply_to=message.message_id)
+    offer_magnet(bot, message.chat.id, message.from_user, message.text.strip(),
+                 key=message.message_id, reply_to=message.message_id)
 
 
-def _offer_magnet(bot, chat_id: int, user, magnet: str, key: int, reply_to: int | None) -> None:
+def offer_magnet(bot, chat_id: int, user, magnet: str,
+                 key: int | None = None, reply_to: int | None = None) -> None:
     """Добавить magnet на паузе и предложить выбрать папку."""
+    key = key if key is not None else _new_key()
     file_hash = hashlib.sha256(magnet.encode()).hexdigest()[:20]
     if _still_active(file_hash):
         bot.send_message(

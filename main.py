@@ -41,6 +41,8 @@ bot = telebot.TeleBot(config.TOKEN, parse_mode=None)
 # он НЕ должен ронять бота при старте (иначе systemd крутит краш-луп рестартов).
 try:
     bot.set_my_commands([
+        telebot.types.BotCommand('/find', 'Найти фильм или сериал на RuTracker'),
+        telebot.types.BotCommand('/rutracker', 'Аккаунт и вход на RuTracker'),
         telebot.types.BotCommand('/follow', 'Подписаться на сериал (LostFilm)'),
         telebot.types.BotCommand('/series', 'Мои подписки на сериалы'),
         telebot.types.BotCommand('/lostfilm', 'Аккаунт и вход на LostFilm'),
@@ -59,7 +61,7 @@ except Exception as e:
     logger.warning(f'Could not set command menu (нет сети?), продолжаю: {e}')
 
 # ── register handlers ─────────────────────────────────────────────────────────
-from handlers import files, history, reports, series, system, torrent
+from handlers import files, history, reports, rutracker, series, system, torrent
 
 torrent.register(bot)
 reports.register(bot)
@@ -67,12 +69,16 @@ files.register(bot)
 system.register(bot)
 history.register(bot)
 series.register(bot)
+# Поиск — последним: он ловит любой обычный текст в личке, поэтому все
+# остальные обработчики (magnet-ссылки, команды) должны сработать раньше.
+rutracker.register(bot)
 
 # ── background tasks ──────────────────────────────────────────────────────────
 from scheduler.tasks import start_background_tasks
 
 start_background_tasks(bot)
 series.start_login_reminder(bot)
+rutracker.start_login_reminder(bot)
 
 # ── run ───────────────────────────────────────────────────────────────────────
 logger.info('Bot started. Polling…')

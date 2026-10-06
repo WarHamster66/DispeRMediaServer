@@ -8,9 +8,10 @@ import time
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config, envfile
+from core import config
 from core.audit import audit
 from core.auth import is_admin, is_authorized
+from handlers import credentials
 from services import lostfilm, series
 
 logger = logging.getLogger(__name__)
@@ -239,62 +240,20 @@ def _cmd_lostfilm(bot, message) -> None:
 
 def _ask_account(bot, chat_id: int, chat_type: str, user_id: int) -> None:
     """Спросить почту и пароль LostFilm и сохранить их в .env (только в личке)."""
-    if chat_type != 'private':
-        bot.send_message(chat_id, '🔒 Почту и пароль LostFilm пришли мне в личные сообщения: '
-                                  'открой чат с ботом и отправь /lostfilm')
-        return
-    msg = bot.send_message(chat_id, '📧 Почта (логин) на LostFilm?\n'
-                                    'Сохраню её в .env на сервере. Передумал — отправь любую команду.')
-    bot.clear_step_handler_by_chat_id(chat_id)  # не копим ожидания от прошлых шагов
-    bot.register_next_step_handler(msg, lambda m: _account_email(bot, m, user_id))
+    credentials.ask(
+        bot, chat_id, chat_type, user_id, site='LostFilm',
+        login_prompt='📧 Почта (логин) на LostFilm?',
+        keys=('LOSTFILM_EMAIL', 'LOSTFILM_PASSWORD'),
+        check=lambda s: None if '@' in s and ' ' not in s else 'Нужна почта вида name@mail.ru — пришли ещё раз:',
+        comment='LostFilm — автоскачивание сериалов по подписке (вход в боте: /lostfilm)',
+        on_saved=lambda m, login, changed, note: _account_saved(bot, m, login, changed, note))
 
 
-def _account_email(bot, message, user_id: int) -> None:
-    text = (message.text or '').strip()
-    if text.startswith('/'):
-        bot.process_new_messages([message])
-        return
-    if message.from_user.id != user_id:
-        return
-    if '@' not in text or ' ' in text:
-        msg = bot.reply_to(message, 'Нужна почта вида name@mail.ru — пришли ещё раз:')
-        bot.register_next_step_handler(msg, lambda m: _account_email(bot, m, user_id))
-        return
-    msg = bot.reply_to(message, '🔑 Теперь пароль от LostFilm.\nСообщение с паролем сразу удалю из чата.')
-    bot.register_next_step_handler(msg, lambda m: _account_password(bot, m, user_id, text))
-
-
-def _account_password(bot, message, user_id: int, email: str) -> None:
-    password = (message.text or '').strip()
-    if password.startswith('/'):
-        bot.process_new_messages([message])
-        return
-    if message.from_user.id != user_id:
-        return
+def _account_saved(bot, message, email: str, changed: bool, note: str) -> None:
     chat_id = message.chat.id
-    try:
-        bot.delete_message(chat_id, message.message_id)  # пароль не должен висеть в чате
-        deleted = True
-    except Exception:
-        deleted = False
-    if not password:
-        bot.send_message(chat_id, 'Пароль пустой — начни заново: /lostfilm')
-        return
-    try:
-        envfile.set_values(config.BASE_DIR / '.env',
-                           {'LOSTFILM_EMAIL': email, 'LOSTFILM_PASSWORD': password},
-                           comment='LostFilm — автоскачивание сериалов по подписке (вход в боте: /lostfilm)')
-    except Exception as e:
-        logger.error(f'Could not save LostFilm account to .env: {e}')
-        bot.send_message(chat_id, f'⚠️ Не смог записать .env: {e}')
-        return
-
-    if email.lower() != (config.LOSTFILM_EMAIL or '').lower():
+    if changed:
         lostfilm.forget_session()  # прежний вход был под другим аккаунтом
-    config.LOSTFILM_EMAIL, config.LOSTFILM_PASSWORD = email, password
     audit(message.from_user, 'LOSTFILM_ACCOUNT', email)
-
-    note = '' if deleted else '\n⚠️ Не смог удалить сообщение с паролем — удали его сам.'
     if lostfilm.logged_in_as():
         bot.send_message(chat_id, f'✅ Аккаунт {email} сохранён. Вход уже выполнен.{note}')
         return
