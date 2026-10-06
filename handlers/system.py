@@ -147,7 +147,7 @@ def _cmd_help(bot, message) -> None:
         '📺 Сериалы (LostFilm)\n'
         '/follow — подписаться: новые серии качаются сами\n'
         '/series — мои подписки\n'
-        '/lostfilm — войти на LostFilm (нужно для скачивания)\n\n'
+        '/lostfilm — аккаунт и вход на LostFilm (нужно для скачивания)\n\n'
         '🎬 Торренты\n'
         '/torrent — добавить торрент (файл или magnet)\n'
         '/torrents — список активных загрузок\n'

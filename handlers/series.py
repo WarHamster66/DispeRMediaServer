@@ -8,9 +8,9 @@ import time
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config
+from core import config, envfile
 from core.audit import audit
-from core.auth import is_authorized
+from core.auth import is_admin, is_authorized
 from services import lostfilm, series
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ def _cmd_follow(bot, message) -> None:
         ask = bot.reply_to(message, 'На какой сериал подписаться? Напиши название — '
                                     'можно по-русски (например: Бункер или Silo).\n'
                                     'Новые серии с LostFilm будут скачиваться сами.')
+        bot.clear_step_handler_by_chat_id(message.chat.id)
         bot.register_next_step_handler(ask, lambda m: _follow_from_reply(bot, m))
         return
     _start_follow(bot, message, parts[1].strip())
@@ -181,22 +182,96 @@ def _short_key(key: str) -> str:
     return hashlib.md5(key.encode()).hexdigest()[:10]
 
 
-# ── /lostfilm: вход с капчей ──────────────────────────────────────────────────
+# ── /lostfilm: аккаунт и вход с капчей ────────────────────────────────────────
 
 def _cmd_lostfilm(bot, message) -> None:
-    if not is_authorized(message.from_user.id):
+    uid = message.from_user.id
+    if not is_authorized(uid):
         bot.reply_to(message, 'Нет доступа.')
         return
     if not lostfilm.is_configured():
-        bot.reply_to(message, series.login_hint())
+        if is_admin(uid):
+            _ask_account(bot, message.chat.id, message.chat.type, uid)
+        else:
+            bot.reply_to(message, '🔑 Аккаунт LostFilm ещё не указан — это делает администратор: /lostfilm')
         return
+    kb = InlineKeyboardMarkup()
+    if is_admin(uid):
+        kb.add(InlineKeyboardButton('✏️ Сменить аккаунт', callback_data='ser:acc'))
     who = lostfilm.logged_in_as()
     if who:
-        kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton('🔄 Войти заново', callback_data='ser:login'))
-        bot.reply_to(message, f'✅ LostFilm: вход уже выполнен ({who}).', reply_markup=kb)
+        bot.reply_to(message, f'✅ LostFilm: вход выполнен ({who}).\nАккаунт: {config.LOSTFILM_EMAIL}',
+                     reply_markup=kb)
         return
+    if is_admin(uid):
+        bot.reply_to(message, f'Аккаунт LostFilm: {config.LOSTFILM_EMAIL}', reply_markup=kb)
     _thread(_send_captcha, bot, message.chat.id, 1, name='LostFilmLogin')
+
+
+def _ask_account(bot, chat_id: int, chat_type: str, user_id: int) -> None:
+    """Спросить почту и пароль LostFilm и сохранить их в .env (только в личке)."""
+    if chat_type != 'private':
+        bot.send_message(chat_id, '🔒 Почту и пароль LostFilm пришли мне в личные сообщения: '
+                                  'открой чат с ботом и отправь /lostfilm')
+        return
+    msg = bot.send_message(chat_id, '📧 Почта (логин) на LostFilm?\n'
+                                    'Сохраню её в .env на сервере. Передумал — отправь любую команду.')
+    bot.clear_step_handler_by_chat_id(chat_id)  # не копим ожидания от прошлых шагов
+    bot.register_next_step_handler(msg, lambda m: _account_email(bot, m, user_id))
+
+
+def _account_email(bot, message, user_id: int) -> None:
+    text = (message.text or '').strip()
+    if text.startswith('/'):
+        bot.process_new_messages([message])
+        return
+    if message.from_user.id != user_id:
+        return
+    if '@' not in text or ' ' in text:
+        msg = bot.reply_to(message, 'Нужна почта вида name@mail.ru — пришли ещё раз:')
+        bot.register_next_step_handler(msg, lambda m: _account_email(bot, m, user_id))
+        return
+    msg = bot.reply_to(message, '🔑 Теперь пароль от LostFilm.\nСообщение с паролем сразу удалю из чата.')
+    bot.register_next_step_handler(msg, lambda m: _account_password(bot, m, user_id, text))
+
+
+def _account_password(bot, message, user_id: int, email: str) -> None:
+    password = (message.text or '').strip()
+    if password.startswith('/'):
+        bot.process_new_messages([message])
+        return
+    if message.from_user.id != user_id:
+        return
+    chat_id = message.chat.id
+    try:
+        bot.delete_message(chat_id, message.message_id)  # пароль не должен висеть в чате
+        deleted = True
+    except Exception:
+        deleted = False
+    if not password:
+        bot.send_message(chat_id, 'Пароль пустой — начни заново: /lostfilm')
+        return
+    try:
+        envfile.set_values(config.BASE_DIR / '.env',
+                           {'LOSTFILM_EMAIL': email, 'LOSTFILM_PASSWORD': password},
+                           comment='LostFilm — автоскачивание сериалов по подписке (вход в боте: /lostfilm)')
+    except Exception as e:
+        logger.error(f'Could not save LostFilm account to .env: {e}')
+        bot.send_message(chat_id, f'⚠️ Не смог записать .env: {e}')
+        return
+
+    if email.lower() != (config.LOSTFILM_EMAIL or '').lower():
+        lostfilm.forget_session()  # прежний вход был под другим аккаунтом
+    config.LOSTFILM_EMAIL, config.LOSTFILM_PASSWORD = email, password
+    audit(message.from_user, 'LOSTFILM_ACCOUNT', email)
+
+    note = '' if deleted else '\n⚠️ Не смог удалить сообщение с паролем — удали его сам.'
+    if lostfilm.logged_in_as():
+        bot.send_message(chat_id, f'✅ Аккаунт {email} сохранён. Вход уже выполнен.{note}')
+        return
+    bot.send_message(chat_id, f'✅ Аккаунт {email} сохранён в .env. Осталось ввести код с картинки.{note}')
+    _thread(_send_captcha, bot, chat_id, 1, name='LostFilmLogin')
 
 
 def _send_captcha(bot, chat_id: int, attempt: int) -> None:
@@ -207,6 +282,7 @@ def _send_captcha(bot, chat_id: int, attempt: int) -> None:
         return
     msg = bot.send_photo(chat_id, io.BytesIO(image),
                          caption='🔑 Вход в LostFilm: напиши в ответ код с картинки.')
+    bot.clear_step_handler_by_chat_id(chat_id)
     bot.register_next_step_handler(msg, lambda m: _captcha_reply(bot, m, attempt))
 
 
@@ -228,6 +304,14 @@ def _captcha_reply(bot, message, attempt: int) -> None:
             _thread(_send_captcha, bot, message.chat.id, attempt + 1, name='LostFilmLogin')
         else:
             bot.reply_to(message, '❌ Код снова не подошёл. Попробуй позже: /lostfilm')
+        return
+    except lostfilm.BadCredentials:
+        kb = None
+        if is_admin(message.from_user.id):
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton('✏️ Ввести почту и пароль заново', callback_data='ser:acc'))
+        bot.reply_to(message, f'❌ LostFilm: неверная почта или пароль ({config.LOSTFILM_EMAIL}).',
+                     reply_markup=kb)
         return
     except Exception as e:
         bot.reply_to(message, f'⚠️ Не получилось войти в LostFilm: {e}')
@@ -302,6 +386,17 @@ def _callback(bot, call) -> None:
         except Exception:
             pass
         _thread(_send_captcha, bot, chat_id, 1, name='LostFilmLogin')
+
+    elif data == 'acc':
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, 'Только для администратора', show_alert=True)
+            return
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
+        except Exception:
+            pass
+        _ask_account(bot, chat_id, call.message.chat.type, call.from_user.id)
 
     else:
         bot.answer_callback_query(call.id, 'Неизвестное действие')

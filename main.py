@@ -43,7 +43,7 @@ try:
     bot.set_my_commands([
         telebot.types.BotCommand('/follow', 'Подписаться на сериал (LostFilm)'),
         telebot.types.BotCommand('/series', 'Мои подписки на сериалы'),
-        telebot.types.BotCommand('/lostfilm', 'Войти на LostFilm (нужно для скачивания)'),
+        telebot.types.BotCommand('/lostfilm', 'Аккаунт и вход на LostFilm'),
         telebot.types.BotCommand('/torrent', 'Добавить торрент или magnet-ссылку'),
         telebot.types.BotCommand('/torrents', 'Активные загрузки'),
         telebot.types.BotCommand('/pause', 'Пауза торрента'),

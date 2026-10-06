@@ -135,9 +135,7 @@ def _choose(items: list[dict]) -> dict:
 
 def login_hint() -> str:
     if not lostfilm.is_configured():
-        return ('🔑 Чтобы бот мог качать с LostFilm, добавь в .env на сервере\n'
-                'LOSTFILM_EMAIL=почта\nLOSTFILM_PASSWORD=пароль\n'
-                'перезапусти бота и войди: /lostfilm')
+        return '🔑 Чтобы бот мог качать с LostFilm, укажи аккаунт: /lostfilm'
     return '🔑 Нужно войти в LostFilm: отправь /lostfilm и введи код с картинки.'
 
 

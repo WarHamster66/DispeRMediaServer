@@ -68,6 +68,10 @@ class BadCaptcha(LostFilmError):
     pass
 
 
+class BadCredentials(LostFilmError):
+    pass
+
+
 # ── session storage ───────────────────────────────────────────────────────────
 
 def _load_auth() -> None:
@@ -101,6 +105,12 @@ _load_auth()
 
 def is_configured() -> bool:
     return bool(config.LOSTFILM_EMAIL and config.LOSTFILM_PASSWORD)
+
+
+def forget_session() -> None:
+    """Забыть вход — например, при смене аккаунта."""
+    if _auth:
+        _drop_auth('вход сброшен')
 
 
 def logged_in_as() -> str | None:
@@ -382,7 +392,7 @@ def finish_login(code: str) -> str:
 
     err = str(res.get('error') or '')
     if err == '3':
-        raise LostFilmError('неверный e-mail или пароль (LOSTFILM_EMAIL / LOSTFILM_PASSWORD в .env)')
+        raise BadCredentials('неверная почта или пароль')
     if res.get('need_captcha') or err in ('1', '2', '4'):
         raise BadCaptcha('неверный код с картинки')
     raise LostFilmError(f'LostFilm не пустил: {str(res)[:200]}')
