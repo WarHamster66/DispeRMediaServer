@@ -124,7 +124,13 @@ def apply_settings(path: Path, proxy: str) -> None:
     time.sleep(2)
     cfg = json.loads(path.read_text(encoding='utf-8-sig'))
     cfg['AllowExternal'] = True  # открыть веб-интерфейс с ПК в локальной сети
-    if proxy:
+    if Path('/etc/systemd/system/socks-bridge.service').exists():
+        # Уже стоит FlareSolverr с локальным мостом (setup_flaresolverr.py) —
+        # оставляем Jackett на мосту: Chrome во FlareSolverr не умеет прокси с паролем.
+        cfg.update({'ProxyType': 2, 'ProxyUrl': '127.0.0.1', 'ProxyPort': 1081,
+                    'ProxyUsername': '', 'ProxyPassword': ''})
+        ok("Прокси для трекеров: локальный мост 127.0.0.1:1081 (FlareSolverr)")
+    elif proxy:
         p = urlparse(proxy)
         cfg['ProxyType'] = 2 if p.scheme.startswith('socks5') else (1 if p.scheme == 'socks4' else 0)
         cfg['ProxyUrl'] = p.hostname

@@ -700,6 +700,17 @@ def step_jackett():
     r = subprocess.run([sys.executable, str(PROJECT_DIR / 'setup_jackett.py')])
     if r.returncode != 0:
         warn("Jackett не установился — можно повторить позже:  sudo python3 setup_jackett.py")
+        return
+
+    print("\n  RuTracker и некоторые другие трекеры показывают проверку «я не робот».\n"
+          "  Для них нужен FlareSolverr (~260 МБ, свой Chrome внутри).\n")
+    if ask_bool("Установить FlareSolverr?", True):
+        r = subprocess.run([sys.executable, str(PROJECT_DIR / 'setup_flaresolverr.py')],
+                           cwd=PROJECT_DIR)
+        if r.returncode != 0:
+            warn("FlareSolverr не установился — повторить:  sudo python3 setup_flaresolverr.py")
+    else:
+        info("Пропущено. Установить позже:  sudo python3 setup_flaresolverr.py")
 
 
 # ── 10. Systemd сервис ─────────────────────────────────────────────────────────
