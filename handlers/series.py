@@ -36,15 +36,32 @@ def _cmd_follow(bot, message) -> None:
         return
     parts = (message.text or '').split(maxsplit=1)
     if len(parts) < 2:
-        bot.reply_to(message, 'На какой сериал подписаться? Например: /follow Silo\n'
-                              'Новые серии с LostFilm будут скачиваться сами.')
+        ask = bot.reply_to(message, 'На какой сериал подписаться? Напиши название '
+                                    '(например: Silo или Бункер).\n'
+                                    'Новые серии с LostFilm будут скачиваться сами.')
+        # Следующее сообщение — название сериала, а не общий поиск по трекерам
+        bot.register_next_step_handler(ask, lambda m: _follow_from_reply(bot, m))
         return
+    _start_follow(bot, message, parts[1].strip())
+
+
+def _follow_from_reply(bot, message) -> None:
+    text = (message.text or '').strip()
+    if not text:
+        return
+    if text.startswith('/'):
+        bot.process_new_messages([message])  # прислали другую команду — выполнить её
+        return
+    _start_follow(bot, message, text)
+
+
+def _start_follow(bot, message, query: str) -> None:
     if not jackett.is_configured():
         bot.reply_to(message, '📺 Подписки работают через Jackett, а он не настроен.\n'
                               'На сервере: sudo python3 setup_jackett.py')
         return
-    status = bot.reply_to(message, f'📺 Ищу «{parts[1]}» на LostFilm…')
-    threading.Thread(target=_run_follow, args=(bot, message, status, parts[1].strip()),
+    status = bot.reply_to(message, f'📺 Ищу «{query}» на LostFilm… (до минуты)')
+    threading.Thread(target=_run_follow, args=(bot, message, status, query),
                      name='SeriesFollow', daemon=True).start()
 
 
@@ -86,7 +103,7 @@ def _do_subscribe(bot, chat_id: int, message_id: int, user, token: str, i: int) 
         _edit(bot, chat_id, message_id, '⌛ Запрос устарел — повтори /follow')
         return
     s = pick['shows'][i]
-    code = f"S{s['season']:02d}E{s['episode']:02d}"
+    label = series.code(s['season'], s['episode'])
     who = getattr(user, 'username', None) or str(user.id)
 
     if not series.subscribe(s['show'], chat_id, s['season'], s['episode'], who):
@@ -94,12 +111,22 @@ def _do_subscribe(bot, chat_id: int, message_id: int, user, token: str, i: int) 
         return
     audit(user, 'SERIES_FOLLOW', s['show'])
 
+    size = s['result'].get('size') or 0
+    size_txt = f' ({size / 1024 ** 3:.1f} ГБ)' if size else ''
+    if s['pack']:
+        latest = f"Последний вышедший — {label} (целиком)"
+        btn = f'⬇️ Скачать {label} целиком{size_txt}'
+        next_txt = f"Новые серии (с сезона {s['season'] + 1}) буду качать сам"
+    else:
+        latest = f"Последняя серия на LostFilm: {label}"
+        btn = f'⬇️ Скачать {label} сейчас{size_txt}'
+        next_txt = "Новые серии буду качать сам"
+
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(f'⬇️ Скачать {code} сейчас', callback_data=f'ser:dl_{token}_{i}'))
+    kb.add(InlineKeyboardButton(btn, callback_data=f'ser:dl_{token}_{i}'))
     _edit(bot, chat_id, message_id,
-          f"✅ Подписка на «{s['show']}»\n"
-          f"Последняя серия на LostFilm: {code}\n\n"
-          f"Новые серии буду качать сам в «{config.SERIES_FOLDER}» "
+          f"✅ Подписка на «{s['show']}»\n{latest}\n\n"
+          f"{next_txt} в «{config.SERIES_FOLDER}» "
           f"(качество {config.SERIES_QUALITY or 'любое'}p) и сообщу сюда.",
           kb)
 
@@ -121,7 +148,7 @@ def _series_view() -> tuple[str, InlineKeyboardMarkup]:
         return ('📺 Подписок пока нет.\nПодписаться: /follow Название сериала', kb)
     lines = ['📺 Подписки на сериалы (LostFilm):\n']
     for s in subs:
-        lines.append(f"• {s['show']} — есть до S{s['season']:02d}E{s['episode']:02d}")
+        lines.append(f"• {s['show']} — есть до {series.code(s['season'], s['episode'])}")
         kb.add(InlineKeyboardButton(f"❌ Отписаться: {s['show'][:40]}",
                                     callback_data=f"ser:un_{_short_key(s['key'])}"))
     lines.append(f"\nПроверяю новинки каждые {config.SERIES_CHECK_MINUTES} мин.")
