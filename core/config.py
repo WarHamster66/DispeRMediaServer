@@ -63,12 +63,10 @@ DISK_ALERT_THRESHOLD: int = _raw.get('DISK_ALERT_THRESHOLD_PERCENT', 10)
 PLEX_URL: str = _raw.get('PLEX_URL', 'http://localhost:32400')
 PLEX_TOKEN: str = _raw.get('PLEX_TOKEN', '')  # необязателен: с localhost Plex пускает без токена
 
-# Поиск по трекерам через Jackett (ключ — секрет, лежит в .env)
-JACKETT_URL: str = _raw.get('JACKETT_URL', 'http://localhost:9117')
-JACKETT_API_KEY: str = os.environ.get('JACKETT_API_KEY', '')
-
-# Подписки на сериалы (автоскачивание новых серий)
-SERIES_INDEXER: str = _raw.get('SERIES_INDEXER', 'lostfilm')      # id индексатора в Jackett
+# Подписки на сериалы с LostFilm (логин и пароль — секрет, лежат в .env)
+LOSTFILM_EMAIL: str = os.environ.get('LOSTFILM_EMAIL', '')
+LOSTFILM_PASSWORD: str = os.environ.get('LOSTFILM_PASSWORD', '')
+LOSTFILM_URL: str = _raw.get('LOSTFILM_URL', '')                  # пусто — первое рабочее зеркало
 SERIES_FOLDER: str = _raw.get('SERIES_FOLDER', 'Сериалы')         # куда качать новые серии
 SERIES_QUALITY: str = _raw.get('SERIES_QUALITY', '1080')          # предпочитаемое качество
 SERIES_CHECK_MINUTES: int = int(_raw.get('SERIES_CHECK_MINUTES', 30))

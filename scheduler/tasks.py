@@ -139,7 +139,7 @@ def _disk_alert_loop(bot) -> None:
 def _series_loop(bot) -> None:
     """Подписки на сериалы: проверять LostFilm на новые серии."""
     from services import series
-    time.sleep(120)  # после старта сначала даём подняться сети и Jackett
+    time.sleep(120)  # после старта сначала даём подняться сети
     while True:
         try:
             n = series.check_new(bot)

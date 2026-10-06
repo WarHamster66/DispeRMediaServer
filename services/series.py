@@ -1,31 +1,27 @@
-"""Подписки на сериалы: бот сам качает новые серии (LostFilm через Jackett).
+"""Подписки на сериалы: бот сам качает новые серии с LostFilm.
 
 Как работает:
-  • /follow Silo — ищем сериал на LostFilm, запоминаем последнюю вышедшую серию;
-  • раз в SERIES_CHECK_MINUTES смотрим ленту новинок LostFilm в Jackett;
-  • серия новее запомненной и в нужном качестве → качаем в SERIES_FOLDER.
+  • /follow Бункер — ищем сериал на LostFilm, запоминаем последнюю вышедшую серию;
+  • раз в SERIES_CHECK_MINUTES открываем страницу каждого сериала из подписок;
+  • вышла серия новее запомненной → качаем в SERIES_FOLDER в нужном качестве.
 
-Индексатор LostFilm в Jackett отдаёт названия вида
-  «Silo - S3E2 - Название серии - rus 1080p WEBDL (LostFilm)»  — серия;
-  «Silo - S3 - rus 1080p WEBDL (LostFilm)»                     — сезон целиком
-(номера без ведущих нулей). Каждое качество — отдельной раздачей. Поиск по
-сериалу отдаёт сезонный пак, если сезон уже вышел целиком, иначе — серии;
-лента новинок — всегда отдельные серии.
+Сам сайт — в services/lostfilm.py.
 """
 import hashlib
 import json
 import logging
 import os
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
 
 from core import config
-from services import jackett
+from services import lostfilm
 from services import transmission as tr
 
 logger = logging.getLogger(__name__)
+
+PACK = lostfilm.PACK
 
 _FILE = Path(config.HISTORY_FILE).parent / 'subscriptions.json'
 _lock = threading.Lock()
@@ -36,13 +32,7 @@ _check_lock = threading.Lock()  # не запускать две проверк�
 _QUALITY_WAIT_CHECKS = 6
 _waited: dict[tuple, int] = {}
 _fail_notified: set[tuple] = set()  # об ошибке скачивания серии сообщаем один раз
-
-# «Show - S3E2 - …» или «Show - S3 - …» (сезонный пак); номера могут быть с нулями
-_EP_RE = re.compile(
-    r'^(?P<show>.+?)\s+-\s+S(?P<s>\d{1,2})(?:E(?P<e>\d{1,3}))?(?=\s+-\s+|\s*$)(?:\s+-\s+(?P<rest>.*))?$',
-    re.I,
-)
-PACK = 999  # «номер серии» для сезона целиком: всё в этом сезоне уже вышло
+_login_alert_sent = False           # «нужно войти в LostFilm» — тоже один раз
 
 
 # ── storage ───────────────────────────────────────────────────────────────────
@@ -65,15 +55,16 @@ def list_subs() -> list[dict]:
         return _load()
 
 
-def subscribe(show: str, chat_id: int, season: int, episode: int, by: str) -> bool:
-    """False — если уже подписаны."""
-    key = _key(show)
+def subscribe(show: dict, chat_id: int, season: int, episode: int, by: str) -> bool:
+    """show — из find_shows(). False — если уже подписаны."""
+    key = _key(show['show'])
     with _lock:
         subs = _load()
         if any(s['key'] == key for s in subs):
             return False
-        subs.append({'show': show, 'key': key, 'season': season, 'episode': episode,
-                     'chat_id': chat_id, 'by': by,
+        subs.append({'show': show['show'], 'title_ru': show.get('title_ru', ''), 'key': key,
+                     'link': show['link'], 'lf_id': show.get('lf_id', ''),
+                     'season': season, 'episode': episode, 'chat_id': chat_id, 'by': by,
                      'added': datetime.now().isoformat(timespec='seconds')})
         _save(subs)
     return True
@@ -91,6 +82,15 @@ def unsubscribe(key: str) -> str | None:
     return None
 
 
+def _update(key: str, **fields) -> None:
+    with _lock:
+        subs = _load()
+        for s in subs:
+            if s['key'] == key:
+                s.update(fields)
+        _save(subs)
+
+
 def _set_last(key: str, season: int, episode: int) -> None:
     with _lock:
         subs = _load()
@@ -100,151 +100,176 @@ def _set_last(key: str, season: int, episode: int) -> None:
         _save(subs)
 
 
-# ── parsing / search ──────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _key(show: str) -> str:
     return ' '.join(show.lower().split())
 
 
-def parse(title: str) -> dict | None:
-    """Разобрать название LostFilm. Для сезонного пака episode == PACK, pack == True."""
-    m = _EP_RE.match((title or '').strip())
-    if not m:
-        return None
-    rest = m['rest'] or ''
-    pack = m['e'] is None
-    # «Название серии - rus 1080p WEBDL (LostFilm)» → название до последнего « - »
-    ep_name = rest.rsplit(' - ', 1)[0] if (' - ' in rest and not pack) else ''
-    return {'show': m['show'].strip(), 'season': int(m['s']),
-            'episode': PACK if pack else int(m['e']),
-            'pack': pack, 'ep_name': ep_name.strip()}
-
-
 def code(season: int, episode: int) -> str:
-    """S03E02 или «сезон 3» для пака."""
+    """S03E02 или «сезон 3» для сезона целиком."""
     return f'сезон {season}' if episode >= PACK else f'S{season:02d}E{episode:02d}'
 
 
-def _quality_ok(title: str) -> bool:
+def display(s: dict) -> str:
+    """«Бункер (Silo)» — или просто Silo, если русского названия нет."""
+    ru = (s.get('title_ru') or '').strip()
+    return f"{ru} ({s['show']})" if ru and ru.lower() != s['show'].lower() else s['show']
+
+
+def _quality_ok(item: dict) -> bool:
     q = config.SERIES_QUALITY.strip().lower()
-    return not q or q in title.lower()
+    return not q or q in f"{item['label']} {item['desc']}".lower()
 
 
-def _best_variant(variants: list[dict]) -> dict:
-    """Из нескольких качеств одной серии выбрать предпочитаемое."""
-    for v in variants:
-        if _quality_ok(v['title']):
-            return v
-    return variants[0]
+def _rank(item: dict) -> int:
+    t = f"{item['label']} {item['desc']}".lower()
+    return 3 if '1080' in t else 2 if ('720' in t or 'mp4' in t) else 1
 
+
+def _choose(items: list[dict]) -> dict:
+    """Предпочитаемое качество, иначе лучшее из доступных."""
+    preferred = [i for i in items if _quality_ok(i)]
+    return preferred[0] if preferred else max(items, key=_rank)
+
+
+def login_hint() -> str:
+    if not lostfilm.is_configured():
+        return ('🔑 Чтобы бот мог качать с LostFilm, добавь в .env на сервере\n'
+                'LOSTFILM_EMAIL=почта\nLOSTFILM_PASSWORD=пароль\n'
+                'перезапусти бота и войди: /lostfilm')
+    return '🔑 Нужно войти в LostFilm: отправь /lostfilm и введи код с картинки.'
+
+
+# ── search ────────────────────────────────────────────────────────────────────
 
 def find_shows(query: str) -> list[dict]:
-    """Найти сериалы на LostFilm: [{show, season, episode, ep_name, result}] (последняя серия)."""
-    results, _ = jackett.search(query, indexer=config.SERIES_INDEXER)
-    shows: dict[str, dict] = {}
-    for r in results:
-        p = parse(r['title'])
-        if not p:
-            continue
-        k = _key(p['show'])
-        cur = shows.get(k)
-        se = (p['season'], p['episode'])
-        if cur is None or se > (cur['season'], cur['episode']):
-            shows[k] = {**p, 'variants': [r]}
-        elif se == (cur['season'], cur['episode']):
-            cur['variants'].append(r)
-    out = []
-    for s in shows.values():
-        s['result'] = _best_variant(s.pop('variants'))
-        out.append(s)
-    return sorted(out, key=lambda s: s['show'])
+    """Сериалы на LostFilm (рус. или англ. название): [{show, title_ru, link, lf_id}]."""
+    return [{'show': x['title'], 'title_ru': x['title_ru'], 'link': x['link'], 'lf_id': x['id']}
+            for x in lostfilm.search(query)]
+
+
+def latest(show: dict) -> dict | None:
+    """Последняя вышедшая серия: {season, episode, name, lf_id, pack}.
+
+    pack=True — её сезон уже можно скачать целиком одной раздачей.
+    """
+    info = lostfilm.series_info(show['link'])
+    if not info['episodes']:
+        return None
+    last = max(info['episodes'], key=lambda e: (e['season'], e['episode']))
+    return {**last, 'pack': last['season'] in info['packs']}
+
+
+def _ensure_link(sub: dict) -> dict:
+    """Подписки, сделанные через Jackett, не знают адрес сериала — находим его."""
+    if sub.get('link'):
+        return sub
+    for x in lostfilm.search(sub['show']):
+        if _key(x['title']) == sub['key']:
+            fields = {'link': x['link'], 'lf_id': x['id'], 'title_ru': x['title_ru']}
+            _update(sub['key'], **fields)
+            return {**sub, **fields}
+    raise lostfilm.LostFilmError(f"не нашёл «{sub['show']}» на LostFilm")
 
 
 # ── download ──────────────────────────────────────────────────────────────────
 
-def download_episode(bot, chat_id: int, show: str, ep: dict, result: dict,
-                     quiet_errors: bool = False) -> bool:
-    """Скачать серию (или сезон целиком) в SERIES_FOLDER и следить за загрузкой."""
+def download_episode(bot, chat_id: int, show_name: str, ep: dict,
+                     items: list[dict] | None = None, quiet_errors: bool = False) -> bool:
+    """Скачать серию (ep['episode'] == PACK — сезон целиком) в SERIES_FOLDER."""
     label = code(ep['season'], ep['episode'])
     location = os.path.join(config.SHARED_FOLDER, config.SERIES_FOLDER)
     try:
-        kind, payload = jackett.fetch(result)
-        torrent = tr.add_and_start(payload, location)
+        if items is None:
+            items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
+        data = lostfilm.download(_choose(items))
+        torrent = tr.add_and_start(data, location)
+    except lostfilm.NeedLogin:
+        if not quiet_errors:
+            _send(bot, chat_id, f'❌ {show_name} {label}: не скачать без входа.\n{login_hint()}')
+        return False
     except tr.InsufficientSpaceError as e:
         if not quiet_errors:
-            _send(bot, chat_id, f"❌ {show} {label}: не хватает места в «{config.SERIES_FOLDER}» "
+            _send(bot, chat_id, f"❌ {show_name} {label}: не хватает места в «{config.SERIES_FOLDER}» "
                                 f"(нужно {e.required / 1024 ** 3:.1f} ГБ, свободно {e.available / 1024 ** 3:.1f} ГБ)")
         return False
     except Exception as e:
-        logger.error(f'Series download failed ({show} {label}): {e}')
+        logger.error(f'Series download failed ({show_name} {label}): {e}')
         if not quiet_errors:
-            _send(bot, chat_id, f"⚠️ Не удалось скачать {show} {label}: {e}\nПопробую ещё раз позже.")
+            _send(bot, chat_id, f'⚠️ Не удалось скачать {show_name} {label}: {e}\nПопробую ещё раз позже.')
         return False
 
-    raw = payload if isinstance(payload, bytes) else payload.encode()
-    file_hash = hashlib.sha256(raw).hexdigest()
+    file_hash = hashlib.sha256(data).hexdigest()
     tr.mark_active(file_hash)
-    if ep.get('pack'):
-        text = f"⬇️ {show} — {label} целиком, качаю в «{config.SERIES_FOLDER}»"
+    if ep['episode'] >= PACK:
+        text = f"⬇️ {show_name} — {label} целиком, качаю в «{config.SERIES_FOLDER}»"
     else:
-        name = f" «{ep['ep_name']}»" if ep.get('ep_name') else ''
-        text = f"🆕 {show} — {label}{name}\nВышла на LostFilm, качаю в «{config.SERIES_FOLDER}»"
+        name = f" «{ep['name']}»" if ep.get('name') else ''
+        text = f"🆕 {show_name} — {label}{name}\nВышла на LostFilm, качаю в «{config.SERIES_FOLDER}»"
     msg = _send(bot, chat_id, text)
     tr.start_monitoring(bot, chat_id, msg.message_id if msg else None, torrent.id, file_hash)
-    logger.info(f'Series download: {show} {label}')
+    logger.info(f'Series download: {show_name} {label}')
     return True
 
 
 def check_new(bot) -> int:
-    """Проверить ленту LostFilm и скачать новые серии. Возвращает число запущенных загрузок."""
+    """Проверить сериалы из подписок и скачать новые серии. Возвращает число запущенных загрузок."""
+    global _login_alert_sent
     subs = list_subs()
-    if not subs or not jackett.is_configured():
-        return 0
-    if not _check_lock.acquire(blocking=False):
+    if not subs or not _check_lock.acquire(blocking=False):
         return 0
     try:
-        results, _ = jackett.search('', indexer=config.SERIES_INDEXER)
-        by_key = {s['key']: s for s in subs}
-
-        # (key, season, episode) → варианты качества
-        found: dict[tuple, dict] = {}
-        for r in results:
-            p = parse(r['title'])
-            if not p or p['pack']:
-                continue  # сезонные паки не качаем автоматически — серии уже пришли по одной
-            sub = by_key.get(_key(p['show']))
-            if not sub or (p['season'], p['episode']) <= (sub['season'], sub['episode']):
-                continue
-            item = found.setdefault((sub['key'], p['season'], p['episode']), {'ep': p, 'variants': []})
-            item['variants'].append(r)
-
+        if lostfilm.logged_in_as():
+            _login_alert_sent = False
         started = 0
-        blocked: set[str] = set()  # сериалы, где текущая серия ещё не скачана
-        for ep_id in sorted(found):  # по порядку серий
-            key, season, episode = ep_id
-            if key in blocked:
-                continue  # не перепрыгиваем через серию этого сериала
-            sub = by_key[key]
-            item = found[ep_id]
+        need_login = False
+        for sub in subs:
+            try:
+                sub = _ensure_link(sub)
+                info = lostfilm.series_info(sub['link'])
+            except Exception as e:
+                logger.warning(f"Series check: {sub['show']}: {e}")
+                continue
+            new = sorted((e for e in info['episodes']
+                          if (e['season'], e['episode']) > (sub['season'], sub['episode'])),
+                         key=lambda e: (e['season'], e['episode']))
+            for ep in new:  # по порядку; не перепрыгиваем через несскачанную серию
+                if not lostfilm.logged_in_as():
+                    need_login = True
+                    break
+                ep_id = (sub['key'], ep['season'], ep['episode'])
+                try:
+                    items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
+                except lostfilm.NeedLogin:
+                    need_login = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Series check: {sub['show']} {code(ep['season'], ep['episode'])}: {e}")
+                    break  # повторим в следующую проверку
 
-            preferred = [v for v in item['variants'] if _quality_ok(v['title'])]
-            if not preferred:
-                _waited[ep_id] = _waited.get(ep_id, 0) + 1
-                if _waited[ep_id] < _QUALITY_WAIT_CHECKS:
-                    blocked.add(key)  # подождём, пока выложат нужное качество
-                    continue
-            variant = preferred[0] if preferred else item['variants'][0]
+                if not any(_quality_ok(i) for i in items):
+                    _waited[ep_id] = _waited.get(ep_id, 0) + 1
+                    if _waited[ep_id] < _QUALITY_WAIT_CHECKS:
+                        break  # подождём, пока выложат нужное качество
 
-            ok = download_episode(bot, sub['chat_id'], sub['show'], item['ep'], variant,
-                                  quiet_errors=ep_id in _fail_notified)
-            if ok:
-                _set_last(key, season, episode)
-                _waited.pop(ep_id, None)
-                _fail_notified.discard(ep_id)
-                started += 1
-            else:
-                _fail_notified.add(ep_id)
-                blocked.add(key)  # повторим эту серию в следующую проверку
+                if download_episode(bot, sub['chat_id'], display(sub), ep, items=items,
+                                    quiet_errors=ep_id in _fail_notified):
+                    _set_last(sub['key'], ep['season'], ep['episode'])
+                    _waited.pop(ep_id, None)
+                    _fail_notified.discard(ep_id)
+                    started += 1
+                else:
+                    _fail_notified.add(ep_id)
+                    break  # повторим эту серию в следующую проверку
+            if need_login:
+                break
+
+        if need_login and not _login_alert_sent:
+            _login_alert_sent = True
+            for chat_id in {s['chat_id'] for s in subs}:
+                _send(bot, chat_id, '📺 Вышли новые серии, но скачать их пока не могу.\n'
+                                    f'{login_hint()}\nСкачаю сразу после входа.')
         return started
     finally:
         _check_lock.release()
