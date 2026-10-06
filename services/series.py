@@ -182,6 +182,11 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
         if items is None:
             items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
         data = lostfilm.download(_choose(items))
+        file_hash = hashlib.sha256(data).hexdigest()
+        if tr.is_active(file_hash):
+            # Transmission молча вернул бы уже добавленный торрент, и мы бы
+            # следили за ним второй раз. Значит, сайт отдал не ту раздачу.
+            raise lostfilm.LostFilmError('LostFilm отдал раздачу, которая уже качается')
         torrent = tr.add_and_start(data, location)
     except lostfilm.NeedLogin:
         if not quiet_errors:
@@ -198,7 +203,6 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
             _send(bot, chat_id, f'⚠️ Не удалось скачать {show_name} {label}: {e}\nПопробую ещё раз позже.')
         return False
 
-    file_hash = hashlib.sha256(data).hexdigest()
     tr.mark_active(file_hash)
     if ep['episode'] >= PACK:
         text = f"⬇️ {show_name} — {label} целиком, качаю в «{config.SERIES_FOLDER}»"

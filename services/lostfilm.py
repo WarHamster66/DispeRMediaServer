@@ -288,8 +288,11 @@ def releases(lf_id: str, season: int, episode: int) -> list[dict]:
     if not auth:
         raise NeedLogin('нужно войти в LostFilm')
     s = _session(auth.get('proxy', False), auth['cookies'])
+    # как кнопка на сайте: PlayEpisode('733003010') → v_search.php?a=733003010.
+    # Старый вид ?c=&s=&e= сайт больше не понимает и отдаёт не ту раздачу.
+    code = f'{lf_id}{season:03d}{episode:03d}'
     r = _request(s, 'GET', auth['base'] + 'v_search.php',
-                 params={'c': lf_id, 's': season, 'e': episode}, allow_redirects=False)
+                 params={'a': code}, allow_redirects=False)
     location = r.headers.get('Location') or ''
     if (r.is_redirect and 'login' in location) or 'log in first' in r.text:
         _drop_auth('сессия истекла, нужен новый вход')
@@ -318,6 +321,9 @@ def releases(lf_id: str, season: int, episode: int) -> list[dict]:
                                 ('' if config.PROXY_URL else ' — нужен PROXY_URL в .env'))
         logger.warning(f'LostFilm: нет раздач на {target}: {_text(page)[:300]!r}')
         raise LostFilmError('на странице раздач пусто (ещё не выложили?)')
+    title = ' | '.join(filter(None, (_text(_find(r'inner-box--subtitle[^>]*>(.*?)</div>', page)),
+                                     _text(_find(r'inner-box--text[^>]*>(.*?)</div>', page)))))
+    logger.info(f'LostFilm: раздачи a={code}: {title or "?"} — {len(items)} шт.')
     for it in items:
         it['proxy'] = via_proxy
     return items
