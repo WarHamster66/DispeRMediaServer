@@ -29,6 +29,7 @@ def start_background_tasks(bot) -> None:
         (_disk_alert_loop, 'DiskAlertMonitor'),
         (_backup_loop, 'WeeklyBackup'),
         (_resume_torrents, 'ResumeTorrents'),
+        (_series_loop, 'SeriesWatcher'),
     ):
         t = threading.Thread(target=target, args=(bot,), name=name, daemon=True)
         t.start()
@@ -133,6 +134,20 @@ def _disk_alert_loop(bot) -> None:
         except Exception as e:
             logger.error(f'Disk alert error: {e}', exc_info=True)
         time.sleep(3600)  # check every hour
+
+
+def _series_loop(bot) -> None:
+    """Подписки на сериалы: проверять LostFilm на новые серии."""
+    from services import series
+    time.sleep(120)  # после старта сначала даём подняться сети и Jackett
+    while True:
+        try:
+            n = series.check_new(bot)
+            if n:
+                logger.info(f'Series watcher: started {n} new episode(s)')
+        except Exception as e:
+            logger.error(f'Series watcher error: {e}')
+        time.sleep(max(5, config.SERIES_CHECK_MINUTES) * 60)
 
 
 def _resume_torrents(bot) -> None:

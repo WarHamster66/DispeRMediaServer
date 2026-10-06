@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -184,63 +185,8 @@ def _handle_torrent_file(bot, message) -> None:
         tmp_path = os.path.join(tempfile.gettempdir(), message.document.file_name)
         with open(tmp_path, 'wb') as f:
             f.write(bot.download_file(file_info.file_path))
-
-        file_hash = _hash_file(tmp_path)
-
-        # Duplicate check — already being monitored in this session
-        if _still_active(file_hash):
-            bot.reply_to(
-                message,
-                '⚠️ Этот торрент уже загружается.\n'
-                'Если это не так — выполни /clear_downloads и отправь снова.',
-            )
-            return
-
-        # Add paused to Transmission — also checks disk space and existing torrents
-        try:
-            torrent = tr.add_torrent_file(tmp_path)
-        except tr.InsufficientSpaceError as e:
-            bot.reply_to(
-                message,
-                f'❌ Недостаточно места на диске.\n'
-                f'Нужно: {_fmt(e.required)}\n'
-                f'Свободно: {_fmt(e.available)}',
-            )
-            return
-
-        # Check for name duplicate among existing torrents
-        try:
-            existing = tr.get_all_torrents()
-            for existing_t in existing:
-                if existing_t.id != torrent.id and existing_t.name == torrent.name:
-                    tr.remove_torrent(torrent.id, delete_data=False)
-                    bot.reply_to(
-                        message,
-                        f"⚠️ '{torrent.name}' уже есть в Transmission.\n"
-                        f"Статус: {existing_t.status}, прогресс: {existing_t.progress:.1f}%",
-                    )
-                    return
-        except Exception:
-            pass  # Non-critical — proceed
-
-        size_str = _fmt(torrent.total_size) if torrent.total_size else 'неизвестно'
-        sent = bot.reply_to(
-            message,
-            f'📥 {torrent.name}\n📦 Размер: {size_str}\n\nКуда скачать?',
-            reply_markup=_folder_keyboard(message.message_id),
-        )
-        with _pending_lock:
-            _pending[message.message_id] = {
-                'torrent_id': torrent.id,
-                'file_hash': file_hash,
-                'name': torrent.name,
-                'size': torrent.total_size,
-                'ts': time.time(),
-                'chat_id': message.chat.id,
-                'menu_msg_id': sent.message_id,
-            }
-        audit(message.from_user, 'TORRENT_ADD', f'{torrent.name} ({size_str})')
-
+        _offer_torrent_path(bot, message.chat.id, message.from_user, tmp_path,
+                            key=message.message_id, reply_to=message.message_id)
     except Exception as e:
         logger.error(f'Error handling torrent file: {e}', exc_info=True)
         bot.reply_to(message, f'Ошибка при обработке файла: {e}')
@@ -252,42 +198,139 @@ def _handle_torrent_file(bot, message) -> None:
                 pass
 
 
+def offer_torrent_bytes(bot, chat_id: int, user, data: bytes, reply_to: int | None = None) -> None:
+    """Предложить скачать .torrent из памяти (например, найденный поиском).
+
+    Дальше всё как для присланного файла: проверка дублей и места, выбор
+    папки, выбор серий.
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix='.torrent')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        _offer_torrent_path(bot, chat_id, user, tmp_path, key=_new_key(), reply_to=reply_to)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _new_key() -> int:
+    """Уникальный ключ для _pending, когда нет исходного сообщения с файлом."""
+    with _pending_lock:
+        while True:
+            key = 10 ** 9 + secrets.randbelow(10 ** 9)
+            if key not in _pending:
+                return key
+
+
+def _offer_torrent_path(bot, chat_id: int, user, tmp_path: str, key: int, reply_to: int | None) -> None:
+    file_hash = _hash_file(tmp_path)
+
+    # Duplicate check — already being monitored in this session
+    if _still_active(file_hash):
+        bot.send_message(
+            chat_id,
+            '⚠️ Этот торрент уже загружается.\n'
+            'Если это не так — выполни /clear_downloads и отправь снова.',
+            reply_to_message_id=reply_to,
+        )
+        return
+
+    # Add paused to Transmission — also checks disk space and existing torrents
+    try:
+        torrent = tr.add_torrent_file(tmp_path)
+    except tr.InsufficientSpaceError as e:
+        bot.send_message(
+            chat_id,
+            f'❌ Недостаточно места на диске.\n'
+            f'Нужно: {_fmt(e.required)}\n'
+            f'Свободно: {_fmt(e.available)}',
+            reply_to_message_id=reply_to,
+        )
+        return
+
+    # Check for name duplicate among existing torrents
+    try:
+        for existing_t in tr.get_all_torrents():
+            if existing_t.id != torrent.id and existing_t.name == torrent.name:
+                tr.remove_torrent(torrent.id, delete_data=False)
+                bot.send_message(
+                    chat_id,
+                    f"⚠️ '{torrent.name}' уже есть в Transmission.\n"
+                    f"Статус: {existing_t.status}, прогресс: {existing_t.progress:.1f}%",
+                    reply_to_message_id=reply_to,
+                )
+                return
+    except Exception:
+        pass  # Non-critical — proceed
+
+    size_str = _fmt(torrent.total_size) if torrent.total_size else 'неизвестно'
+    sent = bot.send_message(
+        chat_id,
+        f'📥 {torrent.name}\n📦 Размер: {size_str}\n\nКуда скачать?',
+        reply_markup=_folder_keyboard(key),
+        reply_to_message_id=reply_to,
+    )
+    with _pending_lock:
+        _pending[key] = {
+            'torrent_id': torrent.id,
+            'file_hash': file_hash,
+            'name': torrent.name,
+            'size': torrent.total_size,
+            'ts': time.time(),
+            'chat_id': chat_id,
+            'menu_msg_id': sent.message_id,
+        }
+    audit(user, 'TORRENT_ADD', f'{torrent.name} ({size_str})')
+
+
 # ── incoming magnet link ──────────────────────────────────────────────────────
 
 def _handle_magnet(bot, message) -> None:
     if not is_authorized(message.from_user.id):
         return
-    magnet = message.text.strip()
+    offer_magnet(bot, message.chat.id, message.from_user, message.text.strip(),
+                 key=message.message_id, reply_to=message.message_id)
+
+
+def offer_magnet(bot, chat_id: int, user, magnet: str,
+                 key: int | None = None, reply_to: int | None = None) -> None:
+    """Добавить magnet на паузе и предложить выбрать папку."""
+    key = key if key is not None else _new_key()
     file_hash = hashlib.sha256(magnet.encode()).hexdigest()[:20]
     if _still_active(file_hash):
-        bot.reply_to(
-            message,
+        bot.send_message(
+            chat_id,
             '⚠️ Этот торрент уже загружается.\n'
             'Если это не так — выполни /clear_downloads и отправь снова.',
+            reply_to_message_id=reply_to,
         )
         return
     try:
         torrent = tr.add_magnet(magnet)
-        sent = bot.reply_to(
-            message,
+        sent = bot.send_message(
+            chat_id,
             f'🧲 {torrent.name or "Магнет"}\n\nКуда скачать?',
-            reply_markup=_folder_keyboard(message.message_id),
+            reply_markup=_folder_keyboard(key),
+            reply_to_message_id=reply_to,
         )
         with _pending_lock:
-            _pending[message.message_id] = {
+            _pending[key] = {
                 'torrent_id': torrent.id,
                 'file_hash': file_hash,
                 'name': torrent.name or 'magnet',
                 'size': 0,
                 'ts': time.time(),
-                'chat_id': message.chat.id,
+                'chat_id': chat_id,
                 'menu_msg_id': sent.message_id,
             }
-        audit(message.from_user, 'TORRENT_ADD', f'magnet: {torrent.name or magnet[:60]}')
+        audit(user, 'TORRENT_ADD', f'magnet: {torrent.name or magnet[:60]}')
         logger.info(f'Magnet added (paused): {torrent.name}')
     except Exception as e:
         logger.error(f'Error adding magnet: {e}', exc_info=True)
-        bot.reply_to(message, f'Ошибка при добавлении magnet: {e}')
+        bot.send_message(chat_id, f'Ошибка при добавлении magnet: {e}', reply_to_message_id=reply_to)
 
 
 # ── callbacks ─────────────────────────────────────────────────────────────────

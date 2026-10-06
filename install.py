@@ -27,7 +27,7 @@ SERVICE_FILE = Path(f'/etc/systemd/system/{SERVICE_NAME}.service')
 TR_SETTINGS  = Path('/etc/transmission-daemon/settings.json')
 SAMBA_CONF   = Path('/etc/samba/smb.conf')
 MEDIA_DIRS   = ['Сериалы', 'Мультсериалы', 'Films', 'Torrent']
-TOTAL        = 10
+TOTAL        = 11
 
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
@@ -573,6 +573,9 @@ def step_env(disk: dict, tr: dict) -> dict:
         f'PROXY_URL={cfg["PROXY_URL"]}',
         '',
     ])
+    # При повторной установке не теряем ключ Jackett (его пишет setup_jackett.py)
+    if cur.get('JACKETT_API_KEY'):
+        content += f'\n# Jackett (поиск по трекерам)\nJACKETT_API_KEY={cur["JACKETT_API_KEY"]}\n'
     env_path.write_text(content)
     env_path.chmod(0o600)   # только owner может читать
     # Установщик работает от root, а бот — от обычного пользователя. Без смены
@@ -685,10 +688,24 @@ def step_plex_library(disk: dict):
     ok("Plex добавлен в группу для чтения медиапапки")
 
 
-# ── 9. Systemd сервис ──────────────────────────────────────────────────────────
+# ── 9. Jackett (поиск по трекерам) ─────────────────────────────────────────────
+
+def step_jackett():
+    hdr(9, "Поиск по трекерам (Jackett)")
+    print("  Jackett — это поиск фильмов прямо в боте (RuTracker, Kinozal, RuTor…)\n"
+          "  и автоскачивание новых серий с LostFilm по подписке.\n")
+    if not ask_bool("Установить Jackett?", True):
+        info("Пропущено. Установить позже:  sudo python3 setup_jackett.py")
+        return
+    r = subprocess.run([sys.executable, str(PROJECT_DIR / 'setup_jackett.py')])
+    if r.returncode != 0:
+        warn("Jackett не установился — можно повторить позже:  sudo python3 setup_jackett.py")
+
+
+# ── 10. Systemd сервис ─────────────────────────────────────────────────────────
 
 def step_systemd(env: dict):
-    hdr(9, "Systemd автозапуск")
+    hdr(10, "Systemd автозапуск")
 
     sudo_user = os.environ.get('SUDO_USER', '')
     run_user  = ask("Пользователь для запуска бота", sudo_user or 'ubuntu')
@@ -756,7 +773,7 @@ WantedBy=multi-user.target
         info(f"После заполнения .env запусти:  systemctl start {SERVICE_NAME}")
 
 
-# ── 10. Статический IP ──────────────────────────────────────────────────────────
+# ── 11. Статический IP ──────────────────────────────────────────────────────────
 
 def _detect_network() -> dict:
     """Активный интерфейс, текущий IP/префикс и шлюз."""
@@ -818,7 +835,7 @@ def _apply_static_netplan(iface, ip_, prefix, gw, dns):
 
 
 def step_static_ip():
-    hdr(10, "Статический IP (рекомендуется)")
+    hdr(11, "Статический IP (рекомендуется)")
     net = _detect_network()
     if not net['iface'] or not net['ip']:
         warn("Не удалось определить сеть — пропускаю настройку IP")
@@ -918,6 +935,7 @@ def main():
     step_python_env()
     env  = step_env(disk, tr)
     step_plex_library(disk)
+    step_jackett()
     step_systemd(env)
     step_static_ip()
     summary(disk, samba)

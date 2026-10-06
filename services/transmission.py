@@ -176,6 +176,26 @@ def add_magnet(magnet_link: str):
     return tc.add_torrent(magnet_link, paused=True, download_dir=config.DOWNLOAD_DIR)
 
 
+def add_and_start(source: bytes | str, location: str):
+    """Добавить торрент (bytes .torrent или magnet) сразу в папку и запустить.
+
+    Для автоскачивания без участия пользователя (подписки на сериалы).
+    Место проверяется на диске целевой папки. Raises InsufficientSpaceError.
+    """
+    tc = get_client()
+    torrent = tc.add_torrent(source, paused=True, download_dir=location)
+    time.sleep(0.5)
+    torrent = tc.get_torrent(torrent.id)
+    size = torrent.total_size or 0
+    if size > 0:
+        free = psutil.disk_usage(location).free
+        if free < size:
+            tc.remove_torrent(torrent.id, delete_data=False)
+            raise InsufficientSpaceError(size, free)
+    tc.start_torrent(torrent.id)
+    return torrent
+
+
 def set_location(torrent_id: int, location: str) -> None:
     """Set the final download directory for a torrent (used for folder selection)."""
     get_client().move_torrent_data(torrent_id, location)

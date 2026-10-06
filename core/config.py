@@ -63,6 +63,16 @@ DISK_ALERT_THRESHOLD: int = _raw.get('DISK_ALERT_THRESHOLD_PERCENT', 10)
 PLEX_URL: str = _raw.get('PLEX_URL', 'http://localhost:32400')
 PLEX_TOKEN: str = _raw.get('PLEX_TOKEN', '')  # необязателен: с localhost Plex пускает без токена
 
+# Поиск по трекерам через Jackett (ключ — секрет, лежит в .env)
+JACKETT_URL: str = _raw.get('JACKETT_URL', 'http://localhost:9117')
+JACKETT_API_KEY: str = os.environ.get('JACKETT_API_KEY', '')
+
+# Подписки на сериалы (автоскачивание новых серий)
+SERIES_INDEXER: str = _raw.get('SERIES_INDEXER', 'lostfilm')      # id индексатора в Jackett
+SERIES_FOLDER: str = _raw.get('SERIES_FOLDER', 'Сериалы')         # куда качать новые серии
+SERIES_QUALITY: str = _raw.get('SERIES_QUALITY', '1080')          # предпочитаемое качество
+SERIES_CHECK_MINUTES: int = int(_raw.get('SERIES_CHECK_MINUTES', 30))
+
 # Папка для еженедельных бэкапов (по умолчанию ~/media-server-backups)
 _backup = _raw.get('BACKUP_DIR', '').strip()
 BACKUP_DIR: str = str(Path(_backup).expanduser()) if _backup else str(Path.home() / 'media-server-backups')
