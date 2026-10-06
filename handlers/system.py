@@ -396,6 +396,32 @@ def _confirm_reboot(bot, call, token: str) -> None:
 
 # ── /update ───────────────────────────────────────────────────────────────────
 
+# Файлы, которые лежат в репозитории как шаблон, но на каждом сервере свои
+# (пути, город, токен Plex…). git pull не умеет обновляться поверх их
+# локальных изменений, поэтому перед обновлением сохраняем свою версию,
+# возвращаем файл к версии из репозитория, обновляемся и кладём свою обратно.
+_LOCAL_FILES = ('config.json',)
+
+
+def _pull_keeping_local(base: str) -> subprocess.CompletedProcess:
+    def git(*args):
+        return subprocess.run(['git', '-C', base, *args],
+                              capture_output=True, text=True, timeout=120)
+
+    saved: dict[str, bytes] = {}
+    for name in _LOCAL_FILES:
+        path = config.BASE_DIR / name
+        if path.exists():
+            saved[name] = path.read_bytes()
+            git('update-index', '--no-skip-worktree', name)  # снять флаг, если ставили
+            git('checkout', '--', name)
+    try:
+        return git('pull', '--ff-only')
+    finally:
+        for name, data in saved.items():
+            (config.BASE_DIR / name).write_bytes(data)
+
+
 def _do_update(bot, chat_id: int, user_id: int) -> None:
     """git pull + обновление зависимостей + перезапуск сервиса."""
     if not _admin_gate(bot, chat_id, user_id):
@@ -404,10 +430,9 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     base = str(config.BASE_DIR)
     bot.send_message(chat_id, '🔄 Проверяю обновления…')
 
-    # git pull
+    # git pull, бережно обходя файлы с локальными настройками сервера
     try:
-        r = subprocess.run(['git', '-C', base, 'pull', '--ff-only'],
-                           capture_output=True, text=True, timeout=120)
+        r = _pull_keeping_local(base)
     except Exception as e:
         bot.send_message(chat_id, f'❌ Ошибка git pull: {e}')
         return
