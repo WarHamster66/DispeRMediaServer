@@ -455,8 +455,11 @@ def step_samba(disk: dict) -> dict:
     shared = disk['SHARED_FOLDER']
 
     # ── Пользователь для доступа ──
-    # Гостевой доступ блокируется Windows 11 и многими ТВ, поэтому заводим
-    # отдельного пользователя с паролем.
+    # Смотреть фильмы может любое устройство в домашней сети (ТВ, телефоны) —
+    # гостем, без пароля. Менять и удалять файлы — только этот пользователь
+    # с паролем: так вирус-шифровальщик на чьём-то телефоне или взломанная
+    # «умная» лампочка не испортят медиатеку. Windows 11 гостей не пускает —
+    # с ПК заходи под этим логином.
     sudo_user = os.environ.get('SUDO_USER', '')
     smb_user = ask("Логин для доступа к шаре (с него зайдёшь с ПК/ТВ)", sudo_user or 'media')
     smb_pass = ask_secret("Пароль для доступа к шаре")
@@ -484,14 +487,19 @@ def step_samba(disk: dict) -> dict:
         rf'\[{re.escape(share_name)}\][^\[]*', '', conf_text, flags=re.DOTALL
     ).rstrip() + '\n'
 
+    # Гостей (неизвестный логин или без логина) пускаем как гостя — только для чтения
+    if not re.search(r'^\s*map to guest\s*=', conf_text, flags=re.M | re.I):
+        conf_text = re.sub(r'^\[global\]\s*$', '[global]\n   map to guest = bad user',
+                           conf_text, count=1, flags=re.M | re.I)
+
     new_block = f"""
 [{share_name}]
    comment = DispeR Media Server
    path = {shared}
    browseable = yes
-   read only = no
-   guest ok = no
-   valid users = {smb_user}
+   guest ok = yes
+   read only = yes
+   write list = {smb_user}
    force user = {smb_user}
    force group = media
    create mask = 0664
@@ -504,6 +512,7 @@ def step_samba(disk: dict) -> dict:
 
     ip = _local_ip()
     ok(f"Samba: \\\\{ip}\\{share_name}  →  {shared}")
+    info(f"Смотреть — любому в домашней сети; менять и удалять — только {smb_user} с паролем")
     return {'share_name': share_name, 'smb_user': smb_user, 'smb_pass': smb_pass}
 
 
@@ -954,6 +963,7 @@ def summary(disk: dict, samba: dict | None = None, env: dict | None = None,
     Адрес (ТВ/прочее): smb://{ip}/{samba['share_name']}
     Логин:             {BD}{samba['smb_user']}{RS}
     Пароль:            {BD}{samba['smb_pass']}{RS}
+    Смотреть можно и без пароля, менять и удалять файлы — только с этим логином.
 
   {BD}Управление ботом:{RS}
     systemctl status  {SERVICE_NAME}
