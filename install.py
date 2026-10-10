@@ -328,6 +328,18 @@ def _find_apparmor_profile() -> Path | None:
     return None
 
 
+def _allow_in_ufw(port: int) -> None:
+    """Если на сервере включён ufw — открыть в нём порт раздач (TCP и UDP)."""
+    if not shutil.which('ufw'):
+        return
+    status = run(['ufw', 'status'], capture=True)
+    if 'Status: active' not in (status.stdout or ''):
+        return
+    for proto in ('tcp', 'udp'):
+        run(['ufw', 'allow', f'{port}/{proto}', 'comment', 'Transmission peers'], check=False, capture=True)
+    ok(f"ufw: открыт порт раздач {port} (TCP/UDP)")
+
+
 def _configure_transmission_apparmor(disk: dict) -> None:
     """Разрешить transmission-daemon писать в медиапапку через AppArmor local-override.
 
@@ -405,7 +417,16 @@ def step_transmission(disk: dict) -> dict:
         'rpc-host-whitelist-enabled': False,
         'ratio-limit-enabled':        False,
         'umask':                      2,
+        # Входящие подключения к раздачам: роутер сам откроет порт по UPnP/NAT-PMP.
+        # Без них загрузка часто «зависает на 99%» — недостающие куски есть у тех,
+        # кто сам не может подключиться к нам.
+        'port-forwarding-enabled':    True,
     })
+    # Порт не 51413: на роутерах Keenetic его держит встроенный Transmission,
+    # и по UPnP открывается только UDP. Свой порт пользователя не трогаем.
+    if existing.get('peer-port', 51413) == 51413:
+        existing['peer-port'] = 51515
+    _allow_in_ufw(existing['peer-port'])
 
     TR_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     TR_SETTINGS.write_text(json.dumps(existing, indent=4))
