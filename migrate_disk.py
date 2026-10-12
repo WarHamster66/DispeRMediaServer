@@ -26,6 +26,7 @@ M = '\033[95m'; C = '\033[96m'; RS = '\033[0m'; BD = '\033[1m'
 PROJECT_DIR = Path(__file__).parent.resolve()
 CFG_PATH = PROJECT_DIR / 'config.json'
 FSTAB = Path('/etc/fstab')
+TR_SETTINGS = Path('/etc/transmission-daemon/settings.json')
 SERVICES = ['media-server', 'transmission-daemon', 'plexmediaserver']
 
 
@@ -88,6 +89,25 @@ def list_devices():
             walk(n.get('children', []), path)
     walk(data.get('blockdevices', []))
     return [d for d in devices if d['type'] in ('disk', 'part')]
+
+
+def _transmission_direct_downloads() -> None:
+    """Пусть Transmission качает сразу в папку назначения.
+
+    Медиапапки теперь — отдельные bind-монтирования, а между ними файл нельзя
+    переименовать, только скопировать. С папкой для недокачанного каждый
+    готовый фильм копировался бы целиком (15 ГБ — четверть часа «на 100%»).
+    Вызывать, пока transmission-daemon остановлен: иначе он перезапишет файл.
+    """
+    try:
+        cfg = json.loads(TR_SETTINGS.read_text())
+    except Exception:
+        return
+    if cfg.get('incomplete-dir-enabled') is False:
+        return
+    cfg.update({'incomplete-dir-enabled': False, 'rename-partial-files': True})
+    TR_SETTINGS.write_text(json.dumps(cfg, indent=4))
+    ok("Transmission качает сразу в папку назначения (без копирования в конце)")
 
 
 def append_fstab(line: str) -> None:
@@ -216,6 +236,7 @@ def main():
             run(['chown', '-R', 'root:media', mnt], check=False)
             run(['chmod', '-R', '2775', mnt], check=False)
             ok("Права выставлены (группа media)")
+            _transmission_direct_downloads()
         finally:
             for s in SERVICES:
                 run(['systemctl', 'start', s], check=False)

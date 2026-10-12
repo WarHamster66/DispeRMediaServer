@@ -405,8 +405,12 @@ def step_transmission(disk: dict) -> dict:
 
     existing.update({
         'download-dir':               disk['DOWNLOAD_DIR'],
-        'incomplete-dir':             disk['DOWNLOAD_DIR'] + '/.incomplete',
-        'incomplete-dir-enabled':     True,
+        # Качаем сразу в папку назначения (Films, Сериалы…), недокачанное — с
+        # расширением .part. С отдельной папкой для недокачанного готовый файл
+        # приходилось КОПИРОВАТЬ: медиапапки — отдельные точки монтирования
+        # (см. migrate_disk.py), и 15 ГБ «висели на 100%» по 15 минут.
+        'incomplete-dir-enabled':     False,
+        'rename-partial-files':       True,
         'rpc-enabled':                True,
         'rpc-port':                   9091,
         'rpc-authentication-required': True,
