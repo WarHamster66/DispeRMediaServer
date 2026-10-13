@@ -5,6 +5,7 @@ import logging
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -113,11 +114,27 @@ def _run_follow(bot, message, status, query: str) -> None:
         _subscribe(bot, chat_id, status.message_id, message.from_user, token, 0)
         return
 
+    # Последняя вышедшая серия у каждого — так видно, что «Dark Matter» 2015
+    # закончился на S03E13, а 2024-й ещё идёт (английские названия одинаковые)
+    shows = shows[:10]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        latest = list(pool.map(_latest_or_none, shows))
     kb = InlineKeyboardMarkup()
-    for i, s in enumerate(shows[:10]):
-        kb.add(InlineKeyboardButton(f'📺 {series.display(s)}'[:60], callback_data=f'ser:pick_{token}_{i}'))
+    for i, (s, last) in enumerate(zip(shows, latest)):
+        label = f'📺 {series.display(s)}'[:45]
+        if last:
+            label += f" · до {series.code(last['season'], last['episode'])}"
+        kb.add(InlineKeyboardButton(label, callback_data=f'ser:pick_{token}_{i}'))
     kb.add(InlineKeyboardButton('✖️ Отмена', callback_data='ser:close'))
-    _edit(bot, chat_id, status.message_id, 'Нашлось несколько сериалов — какой?', kb)
+    _edit(bot, chat_id, status.message_id,
+          'Нашлось несколько сериалов — какой? Рядом — последняя вышедшая серия.', kb)
+
+
+def _latest_or_none(show: dict) -> dict | None:
+    try:
+        return series.latest(show)
+    except Exception:
+        return None
 
 
 def _quality_text() -> str:

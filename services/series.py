@@ -57,10 +57,13 @@ def list_subs() -> list[dict]:
 
 def subscribe(show: dict, chat_id: int, season: int, episode: int, by: str) -> bool:
     """show — из find_shows(). False — если уже подписаны."""
-    key = _key(show['show'])
+    # Ключ — адрес сериала на LostFilm, а не название: у «Dark Matter» 2015
+    # и «Dark Matter» 2024 английское название одно и то же.
+    link = _link_key(show['link'])
+    key = link
     with _lock:
         subs = _load()
-        if any(s['key'] == key for s in subs):
+        if any(_link_key(s.get('link', '')) == link or s['key'] == key for s in subs):
             return False
         subs.append({'show': show['show'], 'title_ru': show.get('title_ru', ''), 'key': key,
                      'link': show['link'], 'lf_id': show.get('lf_id', ''),
@@ -104,6 +107,11 @@ def _set_last(key: str, season: int, episode: int) -> None:
 
 def _key(show: str) -> str:
     return ' '.join(show.lower().split())
+
+
+def _link_key(link: str) -> str:
+    """'/series/Dark_Matter_2024/' → 'series/dark_matter_2024' — уникальный id сериала."""
+    return (link or '').strip().strip('/').lower()
 
 
 def code(season: int, episode: int) -> str:
@@ -163,12 +171,17 @@ def _ensure_link(sub: dict) -> dict:
     """Подписки, сделанные через Jackett, не знают адрес сериала — находим его."""
     if sub.get('link'):
         return sub
-    for x in lostfilm.search(sub['show']):
-        if _key(x['title']) == sub['key']:
-            fields = {'link': x['link'], 'lf_id': x['id'], 'title_ru': x['title_ru']}
-            _update(sub['key'], **fields)
-            return {**sub, **fields}
-    raise lostfilm.LostFilmError(f"не нашёл «{sub['show']}» на LostFilm")
+    same = [x for x in lostfilm.search(sub['show']) if _key(x['title']) == sub['key']]
+    if not same:
+        raise lostfilm.LostFilmError(f"не нашёл «{sub['show']}» на LostFilm")
+    # Несколько сериалов с одним названием (Dark Matter 2015 и 2024) — берём
+    # новый: у него больше id на LostFilm, и именно он, скорее всего, ещё выходит
+    x = max(same, key=lambda s: int(s['id']) if s['id'].isdigit() else 0)
+    if len(same) > 1:
+        logger.warning(f"Series: «{sub['show']}» — {len(same)} сериала с таким названием, беру {x['link']}")
+    fields = {'link': x['link'], 'lf_id': x['id'], 'title_ru': x['title_ru']}
+    _update(sub['key'], **fields)
+    return {**sub, **fields}
 
 
 # ── download ──────────────────────────────────────────────────────────────────
