@@ -131,6 +131,14 @@ def _wanted_size(torrent) -> int:
     return getattr(torrent, 'size_when_done', 0) or torrent.total_size
 
 
+def _left_bytes(torrent) -> int:
+    """Сколько байт выбранных файлов ещё не скачано — точно, без округления."""
+    try:
+        return int(torrent.left_until_done)
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return int(_wanted_size(torrent) * (1 - (torrent.percent_done or 0)))
+
+
 def _is_complete(torrent) -> bool:
     if torrent.status in ('seeding', 'seed pending'):  # seed pending — ждёт очереди раздач
         return True
@@ -272,6 +280,7 @@ def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_ha
     stall_count = 0
     max_stalls = 4
     prev_progress = -1
+    prev_left = None   # сколько байт оставалось на прошлой проверке
     conn_errors = 0
     stall_notified = False
     conn_notified = False
@@ -311,16 +320,20 @@ def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_ha
                 return
 
             size = _wanted_size(torrent)
-            pct = torrent.progress
+            # Процент — из точных байтов: torrent.progress в transmission-rpc
+            # округлён до сотых, и 99.996% у раздачи на 49 ГБ (ещё ~2 МБ)
+            # превращался в «100%» — бот рано писал «сохраняю».
+            left = _left_bytes(torrent)
+            pct = 100.0 * (size - left) / size if size else torrent.percent_done * 100
             # Всё скачано, но Transmission ещё не закончил: проверяет данные или
-            # переносит файл в папку назначения (большой файл — несколько минут)
-            finishing = getattr(torrent, 'left_until_done', None) == 0 or pct >= 100
+            # переименовывает .part (обычно секунды)
+            finishing = left == 0
             if finishing:
                 progress = 'finishing'
                 text = (
                     f"💾 {torrent.name}\n"
                     f"📦 Размер: {_fmt_size(size)}\n"
-                    f"Скачано, сохраняю в папку… Большой файл — может занять пару минут."
+                    f"Скачано, завершаю…"
                 )
             else:
                 # 99.7% вместо «99%», который висит долго и выглядит как зависание
@@ -328,19 +341,28 @@ def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_ha
                 text = (
                     f"⏳ {torrent.name}\n"
                     f"📦 Размер: {_fmt_size(size)}\n"
-                    f"⬇️ {_fmt_size(int(size * pct / 100))} / "
+                    f"⬇️ {_fmt_size(size - left)} / "
                     f"{_fmt_size(size)} ({progress}%)\n"
                     f"🚀 Загрузка: {_fmt_speed(torrent.rate_download)}  "
                     f"📤 Отдача: {_fmt_speed(torrent.rate_upload)}"
                 )
+                if pct >= 99:
+                    text += "\nОстались последние куски — они часто приходят медленнее, это нормально."
 
-            if progress != prev_progress:
-                if message_id is not None:
-                    try:
-                        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-                    except Exception:
-                        pass
-                prev_progress = progress
+            # «Есть прогресс» — по байтам: у больших раздач 1% — это сотни МБ,
+            # и по целым процентам бот зря решал, что загрузка встала
+            moved = prev_left is not None and left < prev_left
+            prev_left = left
+
+            changed = progress != prev_progress
+            if changed and message_id is not None:
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+                except Exception:
+                    pass
+            prev_progress = progress
+
+            if changed or moved:
                 interval_idx = 0
                 stall_count = 0
                 stall_notified = False
