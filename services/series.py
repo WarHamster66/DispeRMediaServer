@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -186,15 +187,39 @@ def _ensure_link(sub: dict) -> dict:
 
 # ── download ──────────────────────────────────────────────────────────────────
 
+def show_folder(s: dict) -> str:
+    """Имя папки сериала внутри SERIES_FOLDER: русское название с LostFilm (иначе английское)."""
+    name = (s.get('title_ru') or s.get('show') or '').strip()
+    name = re.sub(r'[\\/:*?"<>|]+', ' ', name)
+    return ' '.join(name.split()).strip(' .')
+
+
+def season_episodes(show: dict, season: int) -> list[dict]:
+    """Все вышедшие серии сезона по порядку."""
+    info = lostfilm.series_info(show['link'])
+    return sorted((e for e in info['episodes'] if e['season'] == season), key=lambda e: e['episode'])
+
+
+def download_season(bot, chat_id: int, show: dict, episodes: list[dict]) -> int:
+    """Скачать несколько серий по очереди. Вернёт, сколько запущено."""
+    return sum(download_episode(bot, chat_id, display(show), ep, folder=show_folder(show))
+               for ep in episodes)
+
+
 def download_episode(bot, chat_id: int, show_name: str, ep: dict,
-                     items: list[dict] | None = None, quiet_errors: bool = False) -> bool:
-    """Скачать серию (ep['episode'] == PACK — сезон целиком) в SERIES_FOLDER."""
+                     items: list[dict] | None = None, quiet_errors: bool = False,
+                     folder: str = '') -> bool:
+    """Скачать серию (ep['episode'] == PACK — сезон целиком) в SERIES_FOLDER/<folder>."""
     label = code(ep['season'], ep['episode'])
-    location = os.path.join(config.SHARED_FOLDER, config.SERIES_FOLDER)
+    where = '/'.join(x for x in (config.SERIES_FOLDER, folder) if x)
+    location = os.path.join(config.SHARED_FOLDER, config.SERIES_FOLDER, folder)
     try:
         if items is None:
             items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
         data = lostfilm.download(_choose(items))
+        if not os.path.isdir(location):
+            os.makedirs(location, exist_ok=True)
+            os.chmod(location, 0o2775)  # Transmission (группа media) должен писать сюда
         file_hash = hashlib.sha256(data).hexdigest()
         if tr.is_active(file_hash):
             # Transmission молча вернул бы уже добавленный торрент, и мы бы
@@ -207,7 +232,7 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
         return False
     except tr.InsufficientSpaceError as e:
         if not quiet_errors:
-            _send(bot, chat_id, f"❌ {show_name} {label}: не хватает места в «{config.SERIES_FOLDER}» "
+            _send(bot, chat_id, f"❌ {show_name} {label}: не хватает места в «{where}» "
                                 f"(нужно {e.required / 1024 ** 3:.1f} ГБ, свободно {e.available / 1024 ** 3:.1f} ГБ)")
         return False
     except Exception as e:
@@ -218,10 +243,10 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
 
     tr.mark_active(file_hash)
     if ep['episode'] >= PACK:
-        text = f"⬇️ {show_name} — {label} целиком, качаю в «{config.SERIES_FOLDER}»"
+        text = f"⬇️ {show_name} — {label} целиком, качаю в «{where}»"
     else:
         name = f" «{ep['name']}»" if ep.get('name') else ''
-        text = f"🆕 {show_name} — {label}{name}\nВышла на LostFilm, качаю в «{config.SERIES_FOLDER}»"
+        text = f"🆕 {show_name} — {label}{name}\nВышла на LostFilm, качаю в «{where}»"
     msg = _send(bot, chat_id, text)
     tr.start_monitoring(bot, chat_id, msg.message_id if msg else None, torrent.id, file_hash)
     logger.info(f'Series download: {show_name} {label}')
@@ -268,7 +293,7 @@ def check_new(bot) -> int:
                     if _waited[ep_id] < _QUALITY_WAIT_CHECKS:
                         break  # подождём, пока выложат нужное качество
 
-                if download_episode(bot, sub['chat_id'], display(sub), ep, items=items,
+                if download_episode(bot, sub['chat_id'], display(sub), ep, items=items, folder=show_folder(sub),
                                     quiet_errors=ep_id in _fail_notified):
                     _set_last(sub['key'], ep['season'], ep['episode'])
                     _waited.pop(ep_id, None)

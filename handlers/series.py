@@ -177,16 +177,28 @@ def _subscribe(bot, chat_id: int, message_id: int, user, token: str, i: int) -> 
         else:
             dl = last
             btn = f'⬇️ Скачать {label} сейчас'
+        kb = InlineKeyboardMarkup()
+        # Сезон ещё идёт и в нём не одна серия — предложить весь сезон с 1-й серии
+        if not last['pack'] and last['episode'] > 1:
+            try:
+                eps = series.season_episodes(s, last['season'])
+            except Exception:
+                eps = []
+            if len(eps) > 1:
+                with _lock:
+                    pick.setdefault('all', {})[i] = eps
+                kb.add(InlineKeyboardButton(
+                    f"⬇️ Весь сезон {last['season']} с 1-й серии ({len(eps)} шт.)",
+                    callback_data=f'ser:all_{token}_{i}'))
         with _lock:
             pick['dl'][i] = dl
-        kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton(btn, callback_data=f'ser:dl_{token}_{i}'))
     elif is_new:
         lines.append('Серий пока нет — скачаю первую, как только выйдет.')
     else:
         lines.append('Вышедших серий пока нет.')
     if is_new:
-        lines.append(f'\nНовые серии буду качать сам в «{config.SERIES_FOLDER}» '
+        lines.append(f'\nНовые серии буду качать сам в «{config.SERIES_FOLDER}/{series.show_folder(s)}» '
                      f'(качество {_quality_text()}) и сообщу сюда.')
     else:
         lines.append('\nСписок подписок: /series')
@@ -364,8 +376,25 @@ def _callback(bot, call) -> None:
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
         except Exception:
             pass
-        _thread(series.download_episode, bot, chat_id, series.display(pick['shows'][int(i)]), ep,
+        show = pick['shows'][int(i)]
+        _thread(lambda: series.download_episode(bot, chat_id, series.display(show), ep,
+                                                folder=series.show_folder(show)),
                 name='SeriesDownload')
+
+    elif data.startswith('all_'):
+        _, token, i = data.split('_', 2)
+        with _lock:
+            pick = _picks.get(token)
+            eps = (pick or {}).get('all', {}).get(int(i))
+        if not eps:
+            bot.answer_callback_query(call.id, 'Запрос устарел', show_alert=True)
+            return
+        bot.answer_callback_query(call.id, f'Качаю {len(eps)} серий…')
+        try:
+            bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
+        except Exception:
+            pass
+        _thread(series.download_season, bot, chat_id, pick['shows'][int(i)], eps, name='SeriesSeason')
 
     elif data.startswith('un_'):
         short = data[len('un_'):]
