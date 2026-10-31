@@ -35,6 +35,13 @@ _waited: dict[tuple, int] = {}
 _fail_notified: set[tuple] = set()  # об ошибке скачивания серии сообщаем один раз
 _login_alert_sent = False           # «нужно войти в LostFilm» — тоже один раз
 
+# Сайт недоступен целиком (домен сессии заблокирован и т.п.): считаем подряд
+# идущие проверки, где не открылась ни одна страница сериала, и один раз просим
+# перелогиниться — куки входа привязаны к домену, само на зеркало не переедет.
+_SITE_DOWN_ALERT_CHECKS = 3
+_site_down_checks = 0
+_site_alert_sent = False
+
 
 # ── storage ───────────────────────────────────────────────────────────────────
 
@@ -255,7 +262,7 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
 
 def check_new(bot) -> int:
     """Проверить сериалы из подписок и скачать новые серии. Возвращает число запущенных загрузок."""
-    global _login_alert_sent
+    global _login_alert_sent, _site_down_checks, _site_alert_sent
     subs = list_subs()
     if not subs or not _check_lock.acquire(blocking=False):
         return 0
@@ -264,10 +271,18 @@ def check_new(bot) -> int:
             _login_alert_sent = False
         started = 0
         need_login = False
+        opened = 0      # страницы сериалов, которые удалось открыть
+        site_errors = 0  # сайт не отвечает совсем (сеть / блокировка домена)
         for sub in subs:
             try:
                 sub = _ensure_link(sub)
                 info = lostfilm.series_info(sub['link'])
+                opened += 1
+            except lostfilm.LostFilmError as e:
+                logger.warning(f"Series check: {sub['show']}: {e}")
+                if str(e).startswith(('LostFilm не отвечает', 'LostFilm недоступен')):
+                    site_errors += 1
+                continue
             except Exception as e:
                 logger.warning(f"Series check: {sub['show']}: {e}")
                 continue
@@ -304,6 +319,25 @@ def check_new(bot) -> int:
                     break  # повторим эту серию в следующую проверку
             if need_login:
                 break
+
+        if site_errors and not opened:
+            # не открылась ни одна страница: сайт не отвечает вообще.
+            # Несколько проверок подряд — просим перелогиниться, один раз до восстановления.
+            _site_down_checks += 1
+            if _site_down_checks >= _SITE_DOWN_ALERT_CHECKS and not _site_alert_sent:
+                _site_alert_sent = True
+                mins = _SITE_DOWN_ALERT_CHECKS * max(5, config.SERIES_CHECK_MINUTES)
+                for chat_id in {s['chat_id'] for s in subs}:
+                    _send(bot, chat_id,
+                          f'📺 LostFilm не отвечает уже больше {mins} мин — похоже, адрес сайта опять заблокирован.\n'
+                          'Новые серии пока не скачиваются. Сделай вход заново: /lostfilm — бот сам подберёт '
+                          'рабочее зеркало, а после входа подтянет всё пропущенное.')
+        else:
+            if _site_alert_sent:
+                for chat_id in {s['chat_id'] for s in subs}:
+                    _send(bot, chat_id, '📺 LostFilm снова доступен — проверки серий восстановлены.')
+            _site_down_checks = 0
+            _site_alert_sent = False
 
         if need_login and not _login_alert_sent:
             _login_alert_sent = True
