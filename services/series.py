@@ -326,7 +326,8 @@ def check_new(bot) -> int:
             _site_down_checks += 1
             if _site_down_checks >= _SITE_DOWN_ALERT_CHECKS and not _site_alert_sent:
                 _site_alert_sent = True
-                mins = _SITE_DOWN_ALERT_CHECKS * max(5, config.SERIES_CHECK_MINUTES)
+                # первая неудача — в момент T, N-я — через (N-1) интервалов
+                mins = (_SITE_DOWN_ALERT_CHECKS - 1) * max(5, config.SERIES_CHECK_MINUTES)
                 for chat_id in {s['chat_id'] for s in subs}:
                     _send(bot, chat_id,
                           f'📺 LostFilm не отвечает уже больше {mins} мин — похоже, адрес сайта опять заблокирован.\n'
