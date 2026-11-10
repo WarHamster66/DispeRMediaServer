@@ -96,6 +96,9 @@ def _cmd_torrents(bot, message) -> None:
             ('seeding', '✅', 'раздача'),
             ('stopped', '⏸️', 'пауза'),
             ('checking', '🔄', 'проверка'),
+            ('download pending', '⏳', 'в очереди'),
+            ('seed pending', '✅', 'скачан'),
+            ('check pending', '🔄', 'ждёт проверки'),
         ]
         lines = []
         for t in torrents:
@@ -179,36 +182,30 @@ def _handle_torrent_file(bot, message) -> None:
     if not is_authorized(message.from_user.id):
         return
 
-    tmp_path = None
     try:
         file_info = bot.get_file(message.document.file_id)
-        tmp_path = os.path.join(tempfile.gettempdir(), message.document.file_name)
-        with open(tmp_path, 'wb') as f:
-            f.write(bot.download_file(file_info.file_path))
-        _offer_torrent_path(bot, message.chat.id, message.from_user, tmp_path,
-                            key=message.message_id, reply_to=message.message_id)
+        # Имя временного файла не берём из сообщения: оно задаётся отправителем
+        # (может содержать «../») и совпадает у одинаковых файлов от разных людей
+        offer_torrent_bytes(bot, message.chat.id, message.from_user,
+                            bot.download_file(file_info.file_path),
+                            reply_to=message.message_id, key=message.message_id)
     except Exception as e:
         logger.error(f'Error handling torrent file: {e}', exc_info=True)
         bot.reply_to(message, f'Ошибка при обработке файла: {e}')
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
 
 
-def offer_torrent_bytes(bot, chat_id: int, user, data: bytes, reply_to: int | None = None) -> None:
-    """Предложить скачать .torrent из памяти (например, найденный поиском).
+def offer_torrent_bytes(bot, chat_id: int, user, data: bytes, reply_to: int | None = None,
+                        key: int | None = None) -> None:
+    """Предложить скачать .torrent из памяти (присланный файл или найденный поиском).
 
-    Дальше всё как для присланного файла: проверка дублей и места, выбор
-    папки, выбор серий.
+    Проверка дублей и места, выбор папки, выбор серий.
     """
     fd, tmp_path = tempfile.mkstemp(suffix='.torrent')
     try:
         with os.fdopen(fd, 'wb') as f:
             f.write(data)
-        _offer_torrent_path(bot, chat_id, user, tmp_path, key=_new_key(), reply_to=reply_to)
+        _offer_torrent_path(bot, chat_id, user, tmp_path,
+                            key=key if key is not None else _new_key(), reply_to=reply_to)
     finally:
         try:
             os.remove(tmp_path)
@@ -241,6 +238,9 @@ def _offer_torrent_path(bot, chat_id: int, user, tmp_path: str, key: int, reply_
     # Add paused to Transmission — also checks disk space and existing torrents
     try:
         torrent = tr.add_torrent_file(tmp_path)
+    except tr.DuplicateTorrentError as e:
+        bot.send_message(chat_id, _duplicate_text(e.torrent), reply_to_message_id=reply_to)
+        return
     except tr.InsufficientSpaceError as e:
         bot.send_message(
             chat_id,
@@ -286,6 +286,19 @@ def _offer_torrent_path(bot, chat_id: int, user, tmp_path: str, key: int, reply_
     audit(user, 'TORRENT_ADD', f'{torrent.name} ({size_str})')
 
 
+def _duplicate_text(torrent) -> str:
+    """Торрент уже есть в Transmission — его не трогаем, просто объясняем."""
+    with _pending_lock:
+        waiting = any(p['torrent_id'] == torrent.id for p in _pending.values())
+    if waiting:
+        return '⚠️ Этот торрент уже добавлен и ждёт выбора папки — выбери её в сообщении выше.'
+    try:
+        state = f' ({torrent.status}, {torrent.progress:.1f}%)'
+    except Exception:
+        state = ''
+    return f'⚠️ «{torrent.name}» уже есть в Transmission{state}.\nСписок загрузок: /torrents'
+
+
 # ── incoming magnet link ──────────────────────────────────────────────────────
 
 def _handle_magnet(bot, message) -> None:
@@ -328,6 +341,8 @@ def offer_magnet(bot, chat_id: int, user, magnet: str,
             }
         audit(user, 'TORRENT_ADD', f'magnet: {torrent.name or magnet[:60]}')
         logger.info(f'Magnet added (paused): {torrent.name}')
+    except tr.DuplicateTorrentError as e:
+        bot.send_message(chat_id, _duplicate_text(e.torrent), reply_to_message_id=reply_to)
     except Exception as e:
         logger.error(f'Error adding magnet: {e}', exc_info=True)
         bot.send_message(chat_id, f'Ошибка при добавлении magnet: {e}', reply_to_message_id=reply_to)
@@ -387,6 +402,7 @@ def _callback(bot, call) -> None:
                 call.message.chat.id, call.message.message_id,
                 reply_markup=_files_keyboard(msg_id, pending),
             )
+            bot.answer_callback_query(call.id)
             return
 
         _start_download(bot, call, msg_id)
@@ -559,10 +575,25 @@ def _start_download(bot, call, msg_id: int) -> None:
     """Применить выбор файлов, проверить место и запустить загрузку."""
     with _pending_lock:
         pending = _pending.get(msg_id)
-    if not pending or 'location' not in pending:
+        ready = bool(pending and 'location' in pending)
+        busy = ready and pending.get('starting')
+        if ready and not busy:
+            pending['starting'] = True  # двойное нажатие не запустит два монитора
+    if not ready:
         bot.answer_callback_query(call.id, 'Запрос устарел')
         return
+    if busy:
+        bot.answer_callback_query(call.id, 'Уже запускаю…')
+        return
+    started = False
+    try:
+        started = _launch(bot, call, msg_id, pending)
+    finally:
+        if not started:
+            pending['starting'] = False  # можно поправить выбор и нажать ещё раз
 
+
+def _launch(bot, call, msg_id: int, pending: dict) -> bool:
     files = pending.get('files')
     wanted = pending.get('wanted')
     folder = pending['folder']
@@ -571,7 +602,7 @@ def _start_download(bot, call, msg_id: int) -> None:
     if files:
         if not wanted:
             bot.answer_callback_query(call.id, 'Не выбран ни один файл', show_alert=True)
-            return
+            return False
         need = sum(f['size'] for f in files if f['id'] in wanted)
         picked = f"\n🎬 Файлов: {len(wanted)} из {len(files)}"
     else:
@@ -588,7 +619,7 @@ def _start_download(bot, call, msg_id: int) -> None:
                     f'❌ В «{folder}» мало места: свободно {_fmt(free)}, нужно {_fmt(need)}',
                     show_alert=True,
                 )
-                return
+                return False
     except OSError:
         pass
 
@@ -596,11 +627,11 @@ def _start_download(bot, call, msg_id: int) -> None:
         if files:
             unwanted = [f['id'] for f in files if f['id'] not in wanted]
             tr.set_files_wanted(pending['torrent_id'], sorted(wanted), unwanted)
-        tr.mark_active(pending['file_hash'])
         tr.resume_torrent(pending['torrent_id'])
     except Exception as e:
         bot.answer_callback_query(call.id, f'Ошибка: {e}')
-        return
+        return False
+    tr.mark_active(pending['file_hash'])
 
     with _pending_lock:
         _pending.pop(msg_id, None)
@@ -618,17 +649,22 @@ def _start_download(bot, call, msg_id: int) -> None:
     except OSError:
         pass
 
+    # Торрент уже качается — следить за ним надо в любом случае, даже если Telegram
+    # сейчас не дал обновить сообщение: иначе не будет ни «сохранён», ни обновления Plex
+    chat_id, status_id = call.message.chat.id, call.message.message_id
     try:
-        sent = bot.edit_message_text(
+        bot.edit_message_text(
             f"⏳ Загружается: {pending['name']}\n📁 Папка: {folder}{picked}{stats}\n⏳ 0%",
-            call.message.chat.id, call.message.message_id,
-        )
-        tr.start_monitoring(
-            bot, call.message.chat.id, sent.message_id,
-            pending['torrent_id'], pending['file_hash'],
+            chat_id, status_id,
         )
     except Exception as e:
-        bot.answer_callback_query(call.id, f'Ошибка: {e}')
+        logger.warning(f'Could not update status message: {e}')
+    tr.start_monitoring(bot, chat_id, status_id, pending['torrent_id'], pending['file_hash'])
+    try:
+        bot.answer_callback_query(call.id, 'Загрузка началась')
+    except Exception:
+        pass
+    return True
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

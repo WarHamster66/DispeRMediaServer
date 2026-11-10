@@ -232,6 +232,11 @@ def _handle(bot, call) -> None:
         new_path = os.path.join(dest_dir, os.path.basename(src))
         if not _safe_path(new_path):
             bot.answer_callback_query(call.id, 'Недопустимый путь'); return
+        if os.path.exists(new_path):
+            # shutil.move молча затёр бы файл с таким же именем
+            bot.answer_callback_query(call.id, 'В этой папке уже есть файл с таким именем',
+                                      show_alert=True)
+            return
         try:
             shutil.move(src, new_path)
             from core.audit import audit
@@ -325,6 +330,10 @@ def _step_rename(bot, message, *, is_file: bool) -> None:
     new_path = os.path.join(os.path.dirname(old_path), new_name)
     if not _safe_path(new_path):
         bot.reply_to(message, '❌ Недопустимое имя.')
+        return
+    if os.path.exists(new_path):
+        # shutil.move затёр бы существующий файл, а папку переложил бы внутрь тёзки
+        bot.reply_to(message, '❌ Такое имя уже занято — выбери другое.')
         return
     try:
         shutil.move(old_path, new_path)

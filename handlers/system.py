@@ -432,7 +432,12 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     base = str(config.BASE_DIR)
     bot.send_message(chat_id, '🔄 Проверяю обновления…')
 
+    def head() -> str:
+        return subprocess.run(['git', '-C', base, 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True).stdout.strip()
+
     # git pull, бережно обходя файлы с локальными настройками сервера
+    before = head()
     try:
         r = _pull_keeping_local(base)
     except Exception as e:
@@ -443,7 +448,8 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     if r.returncode != 0:
         bot.send_message(chat_id, f'❌ git pull не удался:\n{out[:600]}')
         return
-    if 'up to date' in out.lower() or 'up-to-date' in out.lower():
+    # сравниваем коммиты, а не текст git: он зависит от языка системы
+    if before and head() == before:
         bot.send_message(chat_id, '✅ Уже последняя версия.')
         return
 
@@ -451,8 +457,13 @@ def _do_update(bot, chat_id: int, user_id: int) -> None:
     pip = config.BASE_DIR / 'venv' / 'bin' / 'pip'
     if pip.exists():
         try:
-            subprocess.run([str(pip), 'install', '-q', '-r', str(config.BASE_DIR / 'requirements.txt')],
-                           timeout=300)
+            p = subprocess.run([str(pip), 'install', '-q', '-r', str(config.BASE_DIR / 'requirements.txt')],
+                               capture_output=True, text=True, timeout=300)
+            if p.returncode != 0:
+                logger.warning(f'pip update failed: {p.stderr.strip()[-500:]}')
+                bot.send_message(chat_id, '⚠️ Не удалось обновить зависимости (pip). Если бот после '
+                                          'перезапуска не ответит — на сервере:\n'
+                                          'venv/bin/pip install -r requirements.txt')
         except Exception as e:
             logger.warning(f'pip update failed: {e}')
 

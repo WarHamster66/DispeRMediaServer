@@ -237,6 +237,11 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
         if not quiet_errors:
             _send(bot, chat_id, f'❌ {show_name} {label}: не скачать без входа.\n{login_hint()}')
         return False
+    except tr.DuplicateTorrentError:
+        if not quiet_errors:
+            _send(bot, chat_id, f'ℹ️ {show_name} {label}: этот торрент уже есть в Transmission — '
+                                'второй раз не добавляю. Список загрузок: /torrents')
+        return False
     except tr.InsufficientSpaceError as e:
         if not quiet_errors:
             _send(bot, chat_id, f"❌ {show_name} {label}: не хватает места в «{where}» "

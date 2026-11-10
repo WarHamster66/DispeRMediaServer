@@ -35,6 +35,28 @@ class InsufficientSpaceError(Exception):
         super().__init__(f"Need {required} bytes, only {available} available")
 
 
+class DuplicateTorrentError(Exception):
+    """Torrent with the same infohash is already in Transmission.
+
+    Transmission answers "torrent-duplicate" and transmission-rpc silently
+    returns the EXISTING torrent, so without this check the caller would treat
+    someone else's running download as its own (move it, cancel it, watch it twice).
+    """
+
+    def __init__(self, torrent):
+        self.torrent = torrent
+        super().__init__('torrent is already in Transmission')
+
+
+# snapshot of hashes + add must be atomic, or two simultaneous adds of the same
+# torrent would both look "new"
+_add_lock = threading.Lock()
+
+
+def _known_hashes(tc) -> set[str]:
+    return {_hash_of(t) for t in tc.get_torrents(arguments=['id', 'hashString'])}
+
+
 def get_client() -> Client:
     return Client(
         host=config.TRANSMISSION_HOST,
@@ -139,6 +161,17 @@ def _left_bytes(torrent) -> int:
         return int(_wanted_size(torrent) * (1 - (torrent.percent_done or 0)))
 
 
+def _local_error(torrent) -> str:
+    """Local Transmission error text (disk full, no write permission...), else ''.
+
+    Tracker warnings/errors (codes 1 and 2) are routine and don't stop the download.
+    """
+    try:
+        return (torrent.error_string or 'unknown error') if torrent.error == 3 else ''
+    except (KeyError, AttributeError):
+        return ''
+
+
 def _is_complete(torrent) -> bool:
     if torrent.status in ('seeding', 'seed pending'):  # seed pending — ждёт очереди раздач
         return True
@@ -162,11 +195,15 @@ def add_torrent_file(file_path: str):
     Raises InsufficientSpaceError if there is not enough free space.
     """
     tc = get_client()
-    with open(file_path, 'rb') as f:
-        torrent = tc.add_torrent(f, paused=True, download_dir=config.DOWNLOAD_DIR)
+    with _add_lock:
+        known = _known_hashes(tc)
+        with open(file_path, 'rb') as f:
+            torrent = tc.add_torrent(f, paused=True, download_dir=config.DOWNLOAD_DIR)
 
     time.sleep(0.5)
     torrent = tc.get_torrent(torrent.id)
+    if _hash_of(torrent) in known:
+        raise DuplicateTorrentError(torrent)
 
     if torrent.total_size > 0:
         free = psutil.disk_usage(config.DOWNLOAD_DIR).free
@@ -181,7 +218,12 @@ def add_magnet(magnet_link: str):
     """Add a magnet link PAUSED. Size is unknown until metadata arrives, so disk
     space is not checked. Left paused so the caller can pick a folder first."""
     tc = get_client()
-    return tc.add_torrent(magnet_link, paused=True, download_dir=config.DOWNLOAD_DIR)
+    with _add_lock:
+        known = _known_hashes(tc)
+        torrent = tc.add_torrent(magnet_link, paused=True, download_dir=config.DOWNLOAD_DIR)
+    if _hash_of(torrent) in known:
+        raise DuplicateTorrentError(tc.get_torrent(torrent.id))
+    return torrent
 
 
 def add_and_start(source: bytes | str, location: str):
@@ -191,9 +233,13 @@ def add_and_start(source: bytes | str, location: str):
     Место проверяется на диске целевой папки. Raises InsufficientSpaceError.
     """
     tc = get_client()
-    torrent = tc.add_torrent(source, paused=True, download_dir=location)
+    with _add_lock:
+        known = _known_hashes(tc)
+        torrent = tc.add_torrent(source, paused=True, download_dir=location)
     time.sleep(0.5)
     torrent = tc.get_torrent(torrent.id)
+    if _hash_of(torrent) in known:
+        raise DuplicateTorrentError(torrent)
     size = torrent.total_size or 0
     if size > 0:
         free = psutil.disk_usage(location).free
@@ -284,6 +330,7 @@ def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_ha
     conn_errors = 0
     stall_notified = False
     conn_notified = False
+    error_notified = False
     key = torrent_id  # после первого ответа заменим на стабильный hashString
 
     while True:
@@ -318,6 +365,15 @@ def _monitor_loop(bot, chat_id: int, message_id: int | None, torrent_id, file_ha
             if _is_complete(torrent):
                 _on_complete(bot, chat_id, message_id, torrent, file_hash, tc)
                 return
+
+            err = _local_error(torrent)
+            if err and not error_notified:
+                error_notified = True
+                _safe_send(bot, chat_id,
+                           f"⚠️ {torrent.name}: Transmission остановил загрузку из-за ошибки:\n"
+                           f"{err}\nПосле исправления возобнови: /resume")
+            elif not err:
+                error_notified = False
 
             size = _wanted_size(torrent)
             # Процент — из точных байтов: torrent.progress в transmission-rpc

@@ -228,7 +228,7 @@ def _series_view() -> tuple[str, InlineKeyboardMarkup]:
     for s in subs:
         have = series.code(s['season'], s['episode']) if s['season'] else 'пока ничего'
         lines.append(f'• {series.display(s)} — есть до {have}')
-        kb.add(InlineKeyboardButton(f"❌ Отписаться: {s['show'][:40]}",
+        kb.add(InlineKeyboardButton(f'❌ Отписаться: {series.display(s)[:40]}',
                                     callback_data=f"ser:un_{_short_key(s['key'])}"))
     lines.append(f'\nПроверяю новинки каждые {config.SERIES_CHECK_MINUTES} мин.\n{account}')
     kb.add(InlineKeyboardButton('🔄 Проверить сейчас', callback_data='ser:check'))

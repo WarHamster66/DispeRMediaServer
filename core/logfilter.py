@@ -36,6 +36,11 @@ class TransientNetworkFilter(logging.Filter):
         self._last = 0.0
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Только записи telebot/urllib3: фильтр висит и на общих обработчиках, и
+        # без этой проверки ошибки погоды, Transmission или LostFilm с похожим
+        # текстом превращались в «сбой связи с Telegram» или пропадали совсем.
+        if not record.name.startswith(('TeleBot', 'urllib3')):
+            return True
         text = record.getMessage()
         if record.exc_info and record.exc_info[1] is not None:
             text += ' ' + repr(record.exc_info[1])
