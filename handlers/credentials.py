@@ -7,7 +7,7 @@
 import logging
 from typing import Callable
 
-from core import config, envfile
+from core import config, envfile, steps
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def ask(bot, chat_id: int, chat_type: str, user_id: int, *, site: str, login_pro
                                     'Передумал — отправь любую команду.')
     bot.clear_step_handler_by_chat_id(chat_id)  # не копим ожидания от прошлых шагов
     flow = dict(site=site, keys=keys, on_saved=on_saved, check=check, comment=comment, user_id=user_id)
-    bot.register_next_step_handler(msg, lambda m: _login(bot, m, flow))
+    steps.wait_reply(bot, msg, lambda m: _login(bot, m, flow))
 
 
 def _login(bot, message, flow: dict) -> None:
@@ -42,11 +42,11 @@ def _login(bot, message, flow: dict) -> None:
     error = flow['check'](text) if text else 'Пусто — пришли ещё раз:'
     if error:
         msg = bot.reply_to(message, error)
-        bot.register_next_step_handler(msg, lambda m: _login(bot, m, flow))
+        steps.wait_reply(bot, msg, lambda m: _login(bot, m, flow))
         return
     msg = bot.reply_to(message, f"🔑 Теперь пароль от {flow['site']}.\n"
                                 'Сообщение с паролем сразу удалю из чата.')
-    bot.register_next_step_handler(msg, lambda m: _password(bot, m, flow, text))
+    steps.wait_reply(bot, msg, lambda m: _password(bot, m, flow, text))
 
 
 def _password(bot, message, flow: dict, login: str) -> None:

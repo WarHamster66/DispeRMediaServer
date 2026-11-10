@@ -6,7 +6,7 @@ import shutil
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core import config
-from file_manager import id_to_path, is_allowed, is_inside_share, path_to_id
+from file_manager import id_to_path, is_allowed, is_inside_share, listdir_allowed, nav_buttons, page_of, path_to_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,34 +29,27 @@ def send_root(bot, chat_id: int) -> None:
 
 # ── keyboard ──────────────────────────────────────────────────────────────────
 
-def _build_keyboard(path: str) -> InlineKeyboardMarkup:
+def _build_keyboard(path: str, page: int = 0) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
-    buttons = []
 
     if os.path.abspath(path) != os.path.abspath(config.SHARED_FOLDER):
         parent = os.path.dirname(path)
-        buttons.append(InlineKeyboardButton('⬅️ Назад', callback_data=f'{_PREFIX}:dir_{path_to_id(parent)}'))
+        kb.row(InlineKeyboardButton('⬅️ Назад', callback_data=f'{_PREFIX}:dir_{path_to_id(parent)}'))
 
-    try:
-        for item in sorted(os.listdir(path)):
-            item_path = os.path.join(path, item)
-            if not os.path.isdir(item_path):
-                continue
-            if config.USE_ALLOWED_FOLDERS and not _is_allowed(item_path):
-                continue
-            uid = path_to_id(item_path)
-            buttons.append(InlineKeyboardButton(f'📁 {item}', callback_data=f'{_PREFIX}:dir_{uid}'))
-            if not _is_protected(item_path):
-                buttons.append(InlineKeyboardButton(f'🗑️ {item}', callback_data=f'{_PREFIX}:confirm_{uid}'))
-    except Exception as e:
-        logger.error(f"Error listing {path}: {e}")
+    # по 2 кнопки на папку (открыть / удалить) — значит, папок на странице вдвое меньше
+    folders, page, pages = page_of(listdir_allowed(path, dirs_only=True), page, size=20)
+    for item in folders:
+        item_path = os.path.join(path, item)
+        uid = path_to_id(item_path)
+        row = [InlineKeyboardButton(f'📁 {item}', callback_data=f'{_PREFIX}:dir_{uid}')]
+        if not _is_protected(item_path):
+            row.append(InlineKeyboardButton(f'🗑️ {item}', callback_data=f'{_PREFIX}:confirm_{uid}'))
+        kb.row(*row)
 
-    for i in range(0, len(buttons), 2):
-        if i + 1 < len(buttons):
-            kb.row(buttons[i], buttons[i + 1])
-        else:
-            kb.add(buttons[i])
-
+    here = path_to_id(path)
+    nav = nav_buttons(lambda n: f'{_PREFIX}:dirp_{here}_{n}', page, pages)
+    if nav:
+        kb.row(*nav)
     kb.row(InlineKeyboardButton('❌ Закрыть', callback_data=f'{_PREFIX}:close'))
     return kb
 
@@ -83,7 +76,20 @@ def _handle(bot, call) -> None:
         bot.delete_message(call.message.chat.id, call.message.message_id)
         return
 
-    if action_data.startswith('dir_'):
+    if action_data.startswith('dirp_'):
+        uid, _, page = action_data[5:].rpartition('_')
+        path = id_to_path(uid)
+        if not path or not page.isdigit():
+            bot.answer_callback_query(call.id, 'Путь не найден')
+            return
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                          reply_markup=_build_keyboard(path, int(page)))
+        except Exception as e:
+            logger.debug(e)
+        bot.answer_callback_query(call.id)
+
+    elif action_data.startswith('dir_'):
         uid = action_data[4:]
         path = id_to_path(uid)
         if not path:

@@ -126,6 +126,64 @@ def _watch_remove(key) -> None:
             _save_watch(data)
 
 
+# ── seeding after completion ──────────────────────────────────────────────────
+# {hashString: {'name', 'until'}} — когда убрать торрент из Transmission.
+# На диске, чтобы срок не сбрасывался после перезапуска бота.
+_SEED_FILE = Path(config.HISTORY_FILE).parent / 'seeding.json'
+
+
+def _seed_load() -> dict:
+    try:
+        return json.loads(_SEED_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _seed_save(data: dict) -> None:
+    try:
+        tmp = _SEED_FILE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(_SEED_FILE)
+    except Exception as e:
+        logger.warning(f'Could not save seeding list: {e}')
+
+
+def _seed_add(hs: str, name: str, hours: float) -> None:
+    with _watch_lock:
+        data = _seed_load()
+        data[hs] = {'name': name, 'until': time.time() + hours * 3600}
+        _seed_save(data)
+
+
+def cleanup_seeding() -> int:
+    """Убрать из Transmission торренты, у которых вышел срок раздачи (файлы остаются)."""
+    with _watch_lock:
+        data = _seed_load()
+    due = [hs for hs, v in data.items() if v.get('until', 0) <= time.time()]
+    if not due:
+        return 0
+    tc = get_client()
+    present = {_hash_of(t) for t in tc.get_torrents(arguments=['id', 'hashString'])}
+    removed = 0
+    for hs in due:
+        if hs in present:
+            try:
+                tc.remove_torrent(hs, delete_data=False)
+                removed += 1
+                logger.info(f"Seeding finished, removed from Transmission: {data[hs].get('name', hs)}")
+            except Exception as e:
+                logger.warning(f'Could not remove seeded torrent {hs}: {e}')
+                continue  # попробуем в следующий раз
+        data.pop(hs, None)  # убран или его уже удалили вручную
+    with _watch_lock:
+        current = _seed_load()
+        for hs in due:
+            if hs not in data:
+                current.pop(hs, None)
+        _seed_save(current)
+    return removed
+
+
 def resume_monitoring(bot) -> int:
     """После старта бота продолжить следить за недокачанными торрентами."""
     with _watch_lock:
@@ -454,10 +512,17 @@ def _on_complete(bot, chat_id: int, message_id: int | None, torrent, file_hash: 
     size = _wanted_size(torrent)
     dl_dir = torrent.download_dir
     try:
-        try:
-            tc.remove_torrent(torrent.id, delete_data=False)
-        except Exception as e:
-            logger.warning(f"Could not remove completed torrent {name}: {e}")
+        seed_note = ''
+        if config.SEED_HOURS > 0 and _hash_of(torrent):
+            # Оставляем на раздаче: другим тоже нужны последние куски. Уберёт
+            # cleanup_seeding() из планировщика, когда выйдет срок.
+            _seed_add(_hash_of(torrent), name, config.SEED_HOURS)
+            seed_note = f'\n⬆️ Раздаю ещё {config.SEED_HOURS:g} ч, потом уберу из Transmission (файлы останутся)'
+        else:
+            try:
+                tc.remove_torrent(torrent.id, delete_data=False)
+            except Exception as e:
+                logger.warning(f"Could not remove completed torrent {name}: {e}")
         record_download(name, size, dl_dir)
         logger.info(f"Torrent completed: {name}")
 
@@ -488,7 +553,7 @@ def _on_complete(bot, chat_id: int, message_id: int | None, torrent, file_hash: 
             stats = f"\n📁 В «{folder_name}» теперь {_fmt_size(used)} · свободно {_fmt_size(free)}"
         except Exception:
             pass
-        _safe_send(bot, chat_id, f"🏁 {name} сохранён в {dl_dir}{stats}")
+        _safe_send(bot, chat_id, f"🏁 {name} сохранён в {dl_dir}{stats}{seed_note}")
     except Exception as e:
         logger.error(f"Error handling completed torrent {name}: {e}")
         _safe_send(bot, chat_id, f"⚠️ Ошибка при завершении загрузки: {e}")

@@ -9,7 +9,7 @@ from datetime import datetime
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config
+from core import config, steps
 from core.audit import audit
 from core.auth import is_admin, is_authorized
 from handlers import credentials, torrent
@@ -272,7 +272,7 @@ def _login_flow(bot, chat_id: int, user, attempt: int) -> None:
     msg = bot.send_photo(chat_id, io.BytesIO(image),
                          caption='🔑 Вход на RuTracker: напиши в ответ код с картинки.')
     bot.clear_step_handler_by_chat_id(chat_id)
-    bot.register_next_step_handler(msg, lambda m: _captcha_reply(bot, m, attempt))
+    steps.wait_reply(bot, msg, lambda m: _captcha_reply(bot, m, attempt))
 
 
 def _captcha_reply(bot, message, attempt: int) -> None:

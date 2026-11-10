@@ -30,6 +30,7 @@ def start_background_tasks(bot) -> None:
         (_backup_loop, 'WeeklyBackup'),
         (_resume_torrents, 'ResumeTorrents'),
         (_series_loop, 'SeriesWatcher'),
+        (_seeding_loop, 'SeedingCleanup'),
     ):
         t = threading.Thread(target=target, args=(bot,), name=name, daemon=True)
         t.start()
@@ -91,15 +92,45 @@ def _report_loop(bot) -> None:
         time.sleep(60)
 
 
+_REPORT_RETRIES = 6        # если Telegram недоступен — до 6 попыток…
+_REPORT_RETRY_DELAY = 300  # …раз в 5 минут
+
+
 def _send_scheduled_report(bot) -> None:
-    from core.textutil import send_long
+    from core.textutil import chunks
     from handlers.reports import build_report
     try:
         text = f'🕐 Ежедневный отчёт:\n\n{build_report()}'
-        send_long(bot, config.CHAT_ID, text)
-        logger.info('Daily report sent')
     except Exception as e:
-        logger.error(f'Could not send daily report: {e}')
+        logger.error(f'Could not build daily report: {e}')
+        return
+    # Каждую часть отправляем со своими повторами: если сеть моргнула на второй
+    # части, первая не уйдёт дважды
+    for part in chunks(text):
+        for attempt in range(1, _REPORT_RETRIES + 1):
+            try:
+                bot.send_message(config.CHAT_ID, part)
+                break
+            except Exception as e:
+                if attempt == _REPORT_RETRIES:
+                    logger.error(f'Daily report not sent after {attempt} attempts: {e}')
+                    return
+                logger.warning(f'Daily report attempt {attempt} failed, retry in '
+                               f'{_REPORT_RETRY_DELAY // 60} min: {e}')
+                time.sleep(_REPORT_RETRY_DELAY)
+    logger.info('Daily report sent')
+
+
+def _seeding_loop(bot) -> None:
+    """Убирать из Transmission торренты, которые отраздавали своё (SEED_HOURS)."""
+    from services import transmission as tr
+    time.sleep(60)
+    while True:
+        try:
+            tr.cleanup_seeding()
+        except Exception as e:
+            logger.warning(f'Seeding cleanup error: {e}')
+        time.sleep(600)
 
 
 def _network_loop(bot) -> None:

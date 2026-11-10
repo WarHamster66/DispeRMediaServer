@@ -58,6 +58,11 @@ PROTECTED_FOLDERS: list[str] = _raw.get('PROTECTED_FOLDERS', [])
 CUSTOM_SERVICES: list[str] = _raw.get('CUSTOM_SERVICES', [])
 HDD_DEVICE: str = _raw.get('HDD_DEVICE', '/dev/sdb')
 DISK_ALERT_THRESHOLD: int = _raw.get('DISK_ALERT_THRESHOLD_PERCENT', 10)
+# Сколько часов раздавать скачанное, прежде чем убрать торрент из Transmission
+# (файлы остаются). 0 — убирать сразу после загрузки.
+SEED_HOURS: float = float(_raw.get('SEED_HOURS', 24))
+# Сетевой интерфейс для подсчёта трафика в отчёте; пусто — тот, что смотрит в интернет
+NETWORK_INTERFACE: str = _raw.get('NETWORK_INTERFACE', '')
 
 # Plex (для авто-сканирования библиотеки после загрузки)
 PLEX_URL: str = _raw.get('PLEX_URL', 'http://localhost:32400')

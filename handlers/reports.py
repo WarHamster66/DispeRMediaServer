@@ -6,7 +6,7 @@ from datetime import datetime
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config
+from core import config, steps
 from core.auth import is_authorized
 from core.textutil import send_long
 from services import (
@@ -195,7 +195,7 @@ def _callback(bot, call) -> None:
             'Введите время отчёта (HH:MM):',
             call.message.chat.id, call.message.message_id,
         )
-        bot.register_next_step_handler(call.message, lambda m: _step_set_time(bot, m))
+        steps.wait_reply(bot, call.message, lambda m: _step_set_time(bot, m))
 
 
 def _step_set_time(bot, message) -> None:

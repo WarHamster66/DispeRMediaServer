@@ -11,8 +11,9 @@ import shutil
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config
-from file_manager import id_to_path, is_allowed, is_inside_share, is_valid_name, path_to_id
+from core import config, steps
+from file_manager import (id_to_path, is_allowed, is_inside_share, is_valid_name,
+                          listdir_allowed, nav_buttons, page_of, path_to_id)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,19 @@ def _action_keyboard(path: str) -> InlineKeyboardMarkup:
     return kb
 
 
-def _browse_keyboard(path: str, callback_prefix: str, extra_btn: InlineKeyboardButton | None = None) -> InlineKeyboardMarkup:
+# Режимы обзора папок — для кнопок листания: fileops:pg_<режим>_<uid>_<страница>
+_MODES = {'f': 'pick_file', 'd': 'pick_folder', 'm': 'move_item'}
+
+
+def _keyboard_for(mode: str, path: str, page: int = 0) -> InlineKeyboardMarkup:
+    if mode == 't':
+        return _browse_dest_keyboard(path, page)
+    extra = _move_folder_button(path) if mode == 'm' else None
+    return _browse_keyboard(path, f'{_PREFIX}:{_MODES[mode]}', extra, page=page, mode=mode)
+
+
+def _browse_keyboard(path: str, callback_prefix: str, extra_btn: InlineKeyboardButton | None = None,
+                     page: int = 0, mode: str = '') -> InlineKeyboardMarkup:
     """Generic directory-listing keyboard. callback_prefix is appended with _{uid}."""
     kb = InlineKeyboardMarkup()
 
@@ -56,21 +69,36 @@ def _browse_keyboard(path: str, callback_prefix: str, extra_btn: InlineKeyboardB
     if extra_btn:
         kb.add(extra_btn)
 
-    try:
-        for item in sorted(os.listdir(path)):
-            item_path = os.path.join(path, item)
-            if not _is_allowed(item_path):
-                continue
-            uid = path_to_id(item_path)
-            if os.path.isdir(item_path):
-                kb.add(InlineKeyboardButton(f'📁 {item}', callback_data=f'{callback_prefix}_{uid}'))
-            else:
-                kb.add(InlineKeyboardButton(f'📄 {item}', callback_data=f'{callback_prefix}_{uid}'))
-    except Exception as e:
-        logger.error(f"Error listing {path}: {e}")
+    items, page, pages = page_of(listdir_allowed(path), page)
+    for item in items:
+        item_path = os.path.join(path, item)
+        icon = '📁' if os.path.isdir(item_path) else '📄'
+        kb.add(InlineKeyboardButton(f'{icon} {item}', callback_data=f'{callback_prefix}_{path_to_id(item_path)}'))
 
+    if mode:
+        here = path_to_id(path)
+        nav = nav_buttons(lambda n: f'{_PREFIX}:pg_{mode}_{here}_{n}', page, pages)
+        if nav:
+            kb.row(*nav)
     kb.add(InlineKeyboardButton('❌ Отмена', callback_data=f'{_PREFIX}:close'))
     return kb
+
+
+def _movable_folder(path: str) -> bool:
+    """Папку можно переместить: не корень шары, не медиапапка верхнего уровня
+    и не точка монтирования (за ней — целый диск)."""
+    real = os.path.realpath(path)
+    root = os.path.realpath(config.SHARED_FOLDER)
+    if real == root or not is_allowed(path) or os.path.ismount(path):
+        return False
+    return not (os.path.dirname(real) == root and os.path.basename(real) in config.PROTECTED_FOLDERS)
+
+
+def _move_folder_button(path: str) -> InlineKeyboardButton | None:
+    if not os.path.isdir(path) or not _movable_folder(path):
+        return None
+    return InlineKeyboardButton(f'📦 Переместить папку «{os.path.basename(path)}» целиком',
+                                callback_data=f'{_PREFIX}:move_pick_{path_to_id(path)}')
 
 
 def _is_allowed(path: str) -> bool:
@@ -107,7 +135,7 @@ def _handle(bot, call) -> None:
             bot.answer_callback_query(call.id, 'Путь не найден'); return
         _state[uid_val] = {'action': 'create', 'path': path, 'msg_id': call.message.message_id}
         bot.send_message(call.message.chat.id, f'Введите имя новой папки в {path}:')
-        bot.register_next_step_handler(call.message, lambda m: _step_create_folder(bot, m))
+        steps.wait_reply(bot, call.message, lambda m: _step_create_folder(bot, m))
         return
 
     # ── rename file: browse to file ──
@@ -119,7 +147,7 @@ def _handle(bot, call) -> None:
         _state[uid_val] = {'action': 'rename_file', 'msg_id': call.message.message_id}
         bot.edit_message_text(
             'Выберите файл для переименования:', call.message.chat.id, call.message.message_id,
-            reply_markup=_browse_keyboard(path, f'{_PREFIX}:pick_file'),
+            reply_markup=_keyboard_for('f', path),
         )
         return
 
@@ -132,7 +160,7 @@ def _handle(bot, call) -> None:
         if os.path.isdir(path):
             bot.edit_message_text(
                 f'📁 {path}', call.message.chat.id, call.message.message_id,
-                reply_markup=_browse_keyboard(path, f'{_PREFIX}:pick_file'),
+                reply_markup=_keyboard_for('f', path),
             )
             return
         # It's a file
@@ -140,7 +168,7 @@ def _handle(bot, call) -> None:
         state.update({'action': 'rename_file', 'path': path})
         _state[uid_val] = state
         bot.send_message(call.message.chat.id, f'Введите новое имя для:\n{os.path.basename(path)}')
-        bot.register_next_step_handler(call.message, lambda m: _step_rename(bot, m, is_file=True))
+        steps.wait_reply(bot, call.message, lambda m: _step_rename(bot, m, is_file=True))
         return
 
     # ── rename folder: browse to folder ──
@@ -152,7 +180,7 @@ def _handle(bot, call) -> None:
         _state[uid_val] = {'action': 'rename_folder', 'msg_id': call.message.message_id}
         bot.edit_message_text(
             'Выберите папку для переименования:', call.message.chat.id, call.message.message_id,
-            reply_markup=_browse_keyboard(path, f'{_PREFIX}:pick_folder'),
+            reply_markup=_keyboard_for('d', path),
         )
         return
 
@@ -166,7 +194,7 @@ def _handle(bot, call) -> None:
         state.update({'action': 'rename_folder', 'path': path})
         _state[uid_val] = state
         bot.send_message(call.message.chat.id, f'Введите новое имя для папки:\n{os.path.basename(path)}')
-        bot.register_next_step_handler(call.message, lambda m: _step_rename(bot, m, is_file=False))
+        steps.wait_reply(bot, call.message, lambda m: _step_rename(bot, m, is_file=False))
         return
 
     # ── move: pick source ──
@@ -178,7 +206,7 @@ def _handle(bot, call) -> None:
         _state[uid_val] = {'action': 'move', 'msg_id': call.message.message_id}
         bot.edit_message_text(
             'Выберите файл или папку для перемещения:', call.message.chat.id, call.message.message_id,
-            reply_markup=_browse_keyboard(path, f'{_PREFIX}:move_item'),
+            reply_markup=_keyboard_for('m', path),
         )
         return
 
@@ -188,23 +216,37 @@ def _handle(bot, call) -> None:
         path = id_to_path(uid)
         if not path:
             bot.answer_callback_query(call.id, 'Путь не найден'); return
-        if os.path.isdir(path) and _state.get(uid_val, {}).get('action') == 'move' and 'src' not in _state.get(uid_val, {}):
-            # Navigate into folder
+        if os.path.isdir(path):
+            # заходим внутрь; целиком папку выбирают кнопкой «📦 Переместить папку»
             bot.edit_message_text(
                 f'📁 {path}', call.message.chat.id, call.message.message_id,
-                reply_markup=_browse_keyboard(path, f'{_PREFIX}:move_item'),
+                reply_markup=_keyboard_for('m', path),
             )
             return
-        # File or folder selected as source
-        state = _state.get(uid_val, {})
-        state['src'] = path
-        _state[uid_val] = state
-        here_btn = InlineKeyboardButton('📌 Переместить сюда', callback_data=f'{_PREFIX}:move_dest_{path_to_id(config.SHARED_FOLDER)}')
-        bot.edit_message_text(
-            f'Источник: {os.path.basename(path)}\nВыберите папку назначения:',
-            call.message.chat.id, call.message.message_id,
-            reply_markup=_browse_dest_keyboard(config.SHARED_FOLDER),
-        )
+        _choose_move_source(bot, call, uid_val, path)
+        return
+
+    # ── move: whole folder selected as source ──
+    if raw.startswith('move_pick_'):
+        path = id_to_path(raw[10:])
+        if not path or not os.path.isdir(path) or not _movable_folder(path):
+            bot.answer_callback_query(call.id, 'Эту папку перемещать нельзя'); return
+        _choose_move_source(bot, call, uid_val, path)
+        return
+
+    # ── page navigation in any browse mode ──
+    if raw.startswith('pg_'):
+        mode, _, rest = raw[3:].partition('_')
+        uid, _, page = rest.rpartition('_')
+        path = id_to_path(uid)
+        if mode not in ('f', 'd', 'm', 't') or not path or not page.isdigit():
+            bot.answer_callback_query(call.id, 'Путь не найден'); return
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                          reply_markup=_keyboard_for(mode, path, int(page)))
+        except Exception as e:
+            logger.debug(e)
+        bot.answer_callback_query(call.id)
         return
 
     # ── move: browse destination ──
@@ -215,7 +257,7 @@ def _handle(bot, call) -> None:
             bot.answer_callback_query(call.id, 'Папка не найдена'); return
         bot.edit_message_text(
             f'Куда переместить? ({path})', call.message.chat.id, call.message.message_id,
-            reply_markup=_browse_dest_keyboard(path),
+            reply_markup=_keyboard_for('t', path),
         )
         return
 
@@ -232,6 +274,10 @@ def _handle(bot, call) -> None:
         new_path = os.path.join(dest_dir, os.path.basename(src))
         if not _safe_path(new_path):
             bot.answer_callback_query(call.id, 'Недопустимый путь'); return
+        src_real, dest_real = os.path.realpath(src), os.path.realpath(dest_dir)
+        if os.path.isdir(src) and os.path.commonpath([src_real, dest_real]) == src_real:
+            bot.answer_callback_query(call.id, 'Нельзя переместить папку в саму себя', show_alert=True)
+            return
         if os.path.exists(new_path):
             # shutil.move молча затёр бы файл с таким же именем
             bot.answer_callback_query(call.id, 'В этой папке уже есть файл с таким именем',
@@ -255,7 +301,18 @@ def _handle(bot, call) -> None:
     bot.answer_callback_query(call.id, 'Неизвестное действие')
 
 
-def _browse_dest_keyboard(path: str) -> InlineKeyboardMarkup:
+def _choose_move_source(bot, call, uid_val: int, path: str) -> None:
+    state = _state.get(uid_val, {})
+    state.update({'action': 'move', 'src': path})
+    _state[uid_val] = state
+    bot.edit_message_text(
+        f'Источник: {os.path.basename(path)}\nВыберите папку назначения:',
+        call.message.chat.id, call.message.message_id,
+        reply_markup=_keyboard_for('t', config.SHARED_FOLDER),
+    )
+
+
+def _browse_dest_keyboard(path: str, page: int = 0) -> InlineKeyboardMarkup:
     """Keyboard for selecting move destination — shows only directories."""
     kb = InlineKeyboardMarkup()
     uid = path_to_id(path)
@@ -267,15 +324,14 @@ def _browse_dest_keyboard(path: str) -> InlineKeyboardMarkup:
         parent = os.path.dirname(path)
         kb.add(InlineKeyboardButton('⬅️ Назад', callback_data=f'{_PREFIX}:move_dest_browse_{path_to_id(parent)}'))
 
-    try:
-        for item in sorted(os.listdir(path)):
-            item_path = os.path.join(path, item)
-            if not os.path.isdir(item_path) or not _is_allowed(item_path):
-                continue
-            kb.add(InlineKeyboardButton(f'📁 {item}', callback_data=f'{_PREFIX}:move_dest_browse_{path_to_id(item_path)}'))
-    except Exception as e:
-        logger.error(f"Error listing {path}: {e}")
+    folders, page, pages = page_of(listdir_allowed(path, dirs_only=True), page)
+    for item in folders:
+        item_path = os.path.join(path, item)
+        kb.add(InlineKeyboardButton(f'📁 {item}', callback_data=f'{_PREFIX}:move_dest_browse_{path_to_id(item_path)}'))
 
+    nav = nav_buttons(lambda n: f'{_PREFIX}:pg_t_{uid}_{n}', page, pages)
+    if nav:
+        kb.row(*nav)
     kb.add(InlineKeyboardButton('❌ Отмена', callback_data=f'{_PREFIX}:close'))
     return kb
 

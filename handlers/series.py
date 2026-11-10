@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core import config
+from core import config, steps
 from core.audit import audit
 from core.auth import is_admin, is_authorized
 from handlers import credentials
@@ -70,7 +70,7 @@ def _cmd_follow(bot, message) -> None:
                                     'можно по-русски (например: Бункер или Silo).\n'
                                     'Новые серии с LostFilm будут скачиваться сами.')
         bot.clear_step_handler_by_chat_id(message.chat.id)
-        bot.register_next_step_handler(ask, lambda m: _follow_from_reply(bot, m))
+        steps.wait_reply(bot, ask, lambda m: _follow_from_reply(bot, m))
         return
     _start_follow(bot, message, parts[1].strip())
 
@@ -299,7 +299,7 @@ def _send_captcha(bot, chat_id: int, attempt: int) -> None:
     msg = bot.send_photo(chat_id, io.BytesIO(image),
                          caption='🔑 Вход в LostFilm: напиши в ответ код с картинки.')
     bot.clear_step_handler_by_chat_id(chat_id)
-    bot.register_next_step_handler(msg, lambda m: _captcha_reply(bot, m, attempt))
+    steps.wait_reply(bot, msg, lambda m: _captcha_reply(bot, m, attempt))
 
 
 def _captcha_reply(bot, message, attempt: int) -> None:

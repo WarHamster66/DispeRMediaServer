@@ -24,14 +24,42 @@ _state: dict = {
 _MAX_HISTORY = 31 * 24 * 4
 
 
+def _default_iface() -> str:
+    """Интерфейс, через который идёт интернет (маршрут по умолчанию)."""
+    if config.NETWORK_INTERFACE:
+        return config.NETWORK_INTERFACE
+    try:
+        with open('/proc/net/route') as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == '00000000':
+                    return parts[0]
+    except OSError:
+        pass
+    return ''
+
+
+def _counters() -> tuple[str, int, int]:
+    """(интерфейс, принято, отправлено). Только внешний интерфейс: сумма по всем
+    завышала трафик — Docker, WireGuard и обмен внутри сервера считались дважды."""
+    iface = _default_iface()
+    per_nic = psutil.net_io_counters(pernic=True)
+    if iface in per_nic:
+        c = per_nic[iface]
+        return iface, c.bytes_recv, c.bytes_sent
+    total = psutil.net_io_counters()  # интерфейс не нашли — как раньше, по всем
+    return '', total.bytes_recv, total.bytes_sent
+
+
 def _load_initial_state() -> None:
     """Restore totals AND last counters from the most recent saved entry."""
     # Seed last_* with the OS counters as they stand right now so the first
     # save_network_data() call produces a zero-diff instead of adding all the
     # traffic since boot (in particular on the very first run without history).
-    net = psutil.net_io_counters()
-    _state['last_bytes_recv'] = net.bytes_recv
-    _state['last_bytes_sent'] = net.bytes_sent
+    iface, recv, sent = _counters()
+    _state['iface'] = iface
+    _state['last_bytes_recv'] = recv
+    _state['last_bytes_sent'] = sent
     if not os.path.exists(config.NETWORK_FILE):
         return
     try:
@@ -51,21 +79,25 @@ _load_initial_state()
 
 def save_network_data() -> None:
     try:
-        net = psutil.net_io_counters()
+        iface, recv, sent = _counters()
+        if iface != _state.get('iface'):
+            # сменился интерфейс (переподключили кабель/Wi-Fi) — его счётчики с
+            # другого нуля, разницу с прошлым считать нельзя
+            _state.update(iface=iface, last_bytes_recv=recv, last_bytes_sent=sent)
 
-        diff_recv = net.bytes_recv - _state['last_bytes_recv']
-        diff_sent = net.bytes_sent - _state['last_bytes_sent']
+        diff_recv = recv - _state['last_bytes_recv']
+        diff_sent = sent - _state['last_bytes_sent']
 
         # Handle counter reset (reboot)
         if diff_recv < 0:
-            diff_recv = net.bytes_recv
+            diff_recv = recv
         if diff_sent < 0:
-            diff_sent = net.bytes_sent
+            diff_sent = sent
 
         _state['total_bytes_recv'] += diff_recv
         _state['total_bytes_sent'] += diff_sent
-        _state['last_bytes_recv'] = net.bytes_recv
-        _state['last_bytes_sent'] = net.bytes_sent
+        _state['last_bytes_recv'] = recv
+        _state['last_bytes_sent'] = sent
 
         entry = {
             'timestamp': datetime.now().isoformat(),
