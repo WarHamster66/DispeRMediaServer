@@ -30,11 +30,12 @@ _TRANSIENT = (
 
 # Токен бота (есть в адресе каждого запроса к Telegram) и логин:пароль прокси
 _TOKEN_RE = re.compile(r'\d{6,}:[A-Za-z0-9_-]{30,}')
-_URL_AUTH_RE = re.compile(r'(://)[^/@\s]+@')
+_URL_AUTH_RE = re.compile(r'://[^/@\s]+@')
 
 
 def redact(text: str) -> str:
-    return _URL_AUTH_RE.sub(r'***@', _TOKEN_RE.sub('***', text))
+    text = _TOKEN_RE.sub('***', text)
+    return _URL_AUTH_RE.sub('://***@', text)
 
 
 class RedactingFormatter(logging.Formatter):
