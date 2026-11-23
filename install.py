@@ -120,7 +120,8 @@ def step_packages():
     optional = ['lm-sensors', 'smartmontools', 'net-tools', 'iw', 'wireless-tools']
 
     info("apt-get update…")
-    run(['apt-get', 'update', '-qq'])
+    # сломанный сторонний репозиторий не должен мешать установке
+    run(['apt-get', 'update', '-qq'], check=False)
 
     info(f"Установка обязательных: {' '.join(required)}")
     run(['apt-get', 'install', '-y', '-qq'] + required)
@@ -149,11 +150,11 @@ def step_plex():
     info("Добавляю официальный репозиторий Plex…")
     try:
         run(['bash', '-c',
-             'curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key'
+             'curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.v2.key'
              ' | gpg --dearmor > /usr/share/keyrings/plex-archive-keyring.gpg'])
         run(['bash', '-c',
              'echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg]'
-             ' https://downloads.plex.tv/repo/deb public main"'
+             ' https://repo.plex.tv/deb/ public main"'
              ' > /etc/apt/sources.list.d/plexmediaserver.list'])
         run(['apt-get', 'update', '-qq'])
         run(['apt-get', 'install', '-y', '-qq', 'plexmediaserver'])

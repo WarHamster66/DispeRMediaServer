@@ -6,6 +6,7 @@ telebot на каждый обрыв связи с api.telegram.org (прокс�
 раза в минуту вместо простыней.
 """
 import logging
+import re
 import time
 
 _TRANSIENT = (
@@ -25,6 +26,34 @@ _TRANSIENT = (
     'ConnectionError',
     'ReadTimeout',
 )
+
+
+# Токен бота (есть в адресе каждого запроса к Telegram) и логин:пароль прокси
+_TOKEN_RE = re.compile(r'\d{6,}:[A-Za-z0-9_-]{30,}')
+_URL_AUTH_RE = re.compile(r'(://)[^/@\s]+@')
+
+
+def redact(text: str) -> str:
+    return _URL_AUTH_RE.sub(r'***@', _TOKEN_RE.sub('***', text))
+
+
+class RedactingFormatter(logging.Formatter):
+    """Прячет секреты в готовой строке лога, включая traceback."""
+
+    def __init__(self, inner: logging.Formatter):
+        super().__init__()
+        self._inner = inner
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(self._inner.format(record))
+
+
+def redact_handlers(*logger_names: str) -> None:
+    """Включить скрытие секретов у обработчиков указанных логгеров ('' — корневой)."""
+    for name in logger_names:
+        for h in logging.getLogger(name or None).handlers:
+            if not isinstance(h.formatter, RedactingFormatter):
+                h.setFormatter(RedactingFormatter(h.formatter or logging.Formatter()))
 
 
 class TransientNetworkFilter(logging.Filter):

@@ -17,19 +17,22 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 # Приглушаем спам от временных сетевых сбоев (прокси/Telegram)
-from core.logfilter import TransientNetworkFilter
+from core.logfilter import TransientNetworkFilter, redact_handlers
 
 _noise_filter = TransientNetworkFilter(min_interval=60)
 for _name in ('TeleBot', 'urllib3', 'urllib3.connectionpool'):
     logging.getLogger(_name).addFilter(_noise_filter)
 for _h in logging.getLogger().handlers:
     _h.addFilter(_noise_filter)
+redact_handlers('')  # токен бота не должен попадать в лог
 
 logger = logging.getLogger(__name__)
 
 # ── bot setup ─────────────────────────────────────────────────────────────────
 import telebot
 from telebot import apihelper
+
+redact_handlers('TeleBot')  # у telebot свой вывод в stderr — он появляется при импорте
 
 if config.PROXY_URL:
     apihelper.proxy = {'https': config.PROXY_URL}

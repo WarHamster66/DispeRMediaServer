@@ -42,7 +42,8 @@ def ensure_docker() -> None:
     if shutil.which('docker'):
         ok('Docker уже установлен')
     else:
-        run(['apt-get', 'update', '-q'])
+        # сломанный сторонний репозиторий (например, Plex) не должен мешать установке
+        run(['apt-get', 'update', '-q'], check=False)
         run(['apt-get', 'install', '-y', 'docker.io'])
         ok('Docker установлен')
     run(['systemctl', 'enable', '--now', 'docker'], check=False)

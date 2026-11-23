@@ -27,8 +27,9 @@ CHAT_ID: int = int(_require('TELEGRAM_CHAT_ID'))
 # Доверенные пользователи — могут пользоваться ботом
 CREATOR_IDS: list[int] = _ids(_require('CREATOR_IDS'))
 # Администраторы — дополнительно могут перезагружать сервер, обновлять бота и т.п.
-# По умолчанию — владелец (TELEGRAM_CHAT_ID), если это личный чат, а не группа.
-ADMIN_IDS: list[int] = _ids(os.environ.get('ADMIN_IDS', '')) or ([CHAT_ID] if CHAT_ID > 0 else [])
+# Если ADMIN_IDS не задан (установки до появления ролей) — админы все CREATOR_IDS,
+# как было раньше: иначе после /update владелец терял /update и не мог обновиться.
+ADMIN_IDS: list[int] = _ids(os.environ.get('ADMIN_IDS', '')) or list(CREATOR_IDS)
 TRANSMISSION_HOST: str = _require('TRANSMISSION_HOST')
 TRANSMISSION_PORT: int = int(os.environ.get('TRANSMISSION_PORT', '9091'))
 TRANSMISSION_USER: str = _require('TRANSMISSION_USER')
