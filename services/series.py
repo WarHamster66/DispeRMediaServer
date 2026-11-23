@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from services import transmission as tr
 logger = logging.getLogger(__name__)
 
 PACK = lostfilm.PACK
+SPECIALS = 999  # «сезон» 999 на LostFilm — доп. материалы
 
 _FILE = Path(config.HISTORY_FILE).parent / 'subscriptions.json'
 _lock = threading.Lock()
@@ -81,6 +83,11 @@ def subscribe(show: dict, chat_id: int, season: int, episode: int, by: str) -> b
     return True
 
 
+def is_subscribed(show: dict) -> bool:
+    link = _link_key(show['link'])
+    return any(_link_key(s.get('link', '')) == link for s in list_subs())
+
+
 def unsubscribe(key: str) -> str | None:
     """Вернёт название отписанного сериала или None."""
     with _lock:
@@ -124,6 +131,8 @@ def _link_key(link: str) -> str:
 
 def code(season: int, episode: int) -> str:
     """S03E02 или «сезон 3» для сезона целиком."""
+    if season == SPECIALS:
+        return 'доп. материалы' if episode >= PACK else f'доп. материалы, {episode}'
     return f'сезон {season}' if episode >= PACK else f'S{season:02d}E{episode:02d}'
 
 
@@ -138,15 +147,29 @@ def _quality_ok(item: dict) -> bool:
     return not q or q in f"{item['label']} {item['desc']}".lower()
 
 
-def _rank(item: dict) -> int:
+QUALITIES = ('2160p', '1080p', '720p', 'SD')  # от лучшего к худшему
+
+
+def quality_of(item: dict) -> str:
     t = f"{item['label']} {item['desc']}".lower()
-    return 3 if '1080' in t else 2 if ('720' in t or 'mp4' in t) else 1
+    if '2160' in t or '4k' in t:
+        return '2160p'
+    if '1080' in t:
+        return '1080p'
+    if '720' in t or 'mp4' in t or item['label'].strip().lower() == 'hd':
+        return '720p'
+    return 'SD'
 
 
-def _choose(items: list[dict]) -> dict:
-    """Предпочитаемое качество, иначе лучшее из доступных."""
+def _choose(items: list[dict], quality: str = '') -> dict:
+    """Выбранное качество, иначе ближайшее к нему (сначала ниже). Без выбора —
+    качество из настроек, иначе лучшее из доступных."""
+    if quality in QUALITIES:
+        want = QUALITIES.index(quality)
+        return min(items, key=lambda i: (abs(QUALITIES.index(quality_of(i)) - want),
+                                         QUALITIES.index(quality_of(i)) < want))
     preferred = [i for i in items if _quality_ok(i)]
-    return preferred[0] if preferred else max(items, key=_rank)
+    return preferred[0] if preferred else min(items, key=lambda i: QUALITIES.index(quality_of(i)))
 
 
 def login_hint() -> str:
@@ -169,9 +192,10 @@ def latest(show: dict) -> dict | None:
     pack=True — её сезон уже можно скачать целиком одной раздачей.
     """
     info = lostfilm.series_info(show['link'])
-    if not info['episodes']:
+    episodes = [e for e in info['episodes'] if e['season'] != SPECIALS]
+    if not episodes:
         return None
-    last = max(info['episodes'], key=lambda e: (e['season'], e['episode']))
+    last = max(episodes, key=lambda e: (e['season'], e['episode']))
     return {**last, 'pack': last['season'] in info['packs']}
 
 
@@ -207,32 +231,198 @@ def season_episodes(show: dict, season: int) -> list[dict]:
     return sorted((e for e in info['episodes'] if e['season'] == season), key=lambda e: e['episode'])
 
 
-def download_season(bot, chat_id: int, show: dict, episodes: list[dict]) -> int:
-    """Скачать несколько серий по очереди. Вернёт, сколько запущено."""
-    return sum(download_episode(bot, chat_id, display(show), ep, folder=show_folder(show))
-               for ep in episodes)
+_SE_RE = re.compile(r'(?<![A-Za-z0-9])S(\d{1,3})E(\d{1,3})(?!\d)', re.I)
+_VIDEO = ('.mkv', '.mp4', '.avi', '.m4v', '.ts')
+
+
+def parse_se(name: str) -> tuple[int, int] | None:
+    """'Silo.S02E10.1080p.mkv' → (2, 10)."""
+    m = _SE_RE.search(os.path.basename(name))
+    return (int(m[1]), int(m[2])) if m else None
+
+
+def _norm(name: str) -> str:
+    return ' '.join(re.sub(r'[^0-9a-zа-яё]+', ' ', name.lower()).split())
+
+
+def on_disk(show: dict) -> set[tuple[int, int]]:
+    """Серии, которые уже скачаны: в папке сериала и (от старых версий бота,
+    качавших без папок) прямо в SERIES_FOLDER."""
+    root = os.path.join(config.SHARED_FOLDER, config.SERIES_FOLDER)
+    found = set()
+    folder = show_folder(show)
+    if folder:
+        for _, _, files in os.walk(os.path.join(root, folder)):
+            found.update(parse_se(f) for f in files if f.lower().endswith(_VIDEO))
+    names = {_norm(show['show']), _norm(show.get('link', '').strip('/').split('/')[-1])}
+    try:
+        loose = os.listdir(root)
+    except OSError:
+        loose = []
+    for f in loose:
+        m = _SE_RE.search(f)
+        if m and f.lower().endswith(_VIDEO) and _norm(f[:m.start()]) in names:
+            found.add(parse_se(f))
+    found.discard(None)
+    return found
+
+
+def jobs_for(info: dict, have: set, season: int = 0, skip_have: bool = True) -> list[dict]:
+    """Что качать: сезон (season=0 — весь сериал, без доп. материалов).
+
+    Сезон, которого совсем нет, — одной раздачей, если она есть; иначе по сериям.
+    """
+    jobs = []
+    seasons = [season] if season else sorted({e['season'] for e in info['episodes']} - {SPECIALS})
+    for n in seasons:
+        eps = sorted((e for e in info['episodes'] if e['season'] == n), key=lambda e: e['episode'])
+        todo = [e for e in eps if not skip_have or (n, e['episode']) not in have]
+        if not todo:
+            continue
+        if n in info['packs'] and len(todo) == len(eps):
+            jobs.append({**eps[0], 'episode': PACK, 'name': ''})
+        else:
+            jobs += todo
+    return jobs
+
+
+def size_options(info: dict, jobs: list[dict]) -> tuple[dict[str, int], bool]:
+    """Качества и примерный общий размер: ({'1080p': байты}, размер точный?).
+
+    Размер берём по одной раздаче на сезон, остальные серии считаем такими же.
+    """
+    by_season: dict[int, list[dict]] = {}
+    for j in jobs:
+        by_season.setdefault(j['season'], []).append(j)
+
+    def sample(season: int):
+        j = by_season[season][0]
+        try:
+            return season, lostfilm.releases(j['lf_id'], j['season'], j['episode'])
+        except lostfilm.NeedLogin:
+            raise
+        except Exception as e:
+            logger.warning(f"LostFilm sizes: {code(j['season'], j['episode'])}: {e}")
+            return season, []
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        samples = dict(pool.map(sample, by_season))
+    if not any(samples.values()):
+        raise lostfilm.LostFilmError('LostFilm не отдал ни одной раздачи — попробуй позже')
+    exact = all(samples.values())
+    found = {quality_of(i) for items in samples.values() for i in items}
+    sizes = {q: 0 for q in QUALITIES if q in found}
+    for season, items in samples.items():
+        if not items:
+            continue
+        todo = by_season[season]
+        exact = exact and all(i['size'] for i in items)
+        for q in sizes:
+            item = _choose(items, q)
+            if todo[0]['episode'] >= PACK:
+                sizes[q] += item['size']
+            elif item.get('whole'):
+                total = sum(e['season'] == season for e in info['episodes']) or 1
+                sizes[q] += item['size'] * len(todo) // total
+                exact = False
+            else:
+                sizes[q] += item['size'] * len(todo)
+                exact = exact and len(todo) == 1
+    return sizes, exact
+
+
+def download_season(bot, chat_id: int, show: dict, episodes: list[dict],
+                    quality: str = '', manual: bool = False) -> int:
+    """Скачать несколько серий / сезонов по очереди. Вернёт, сколько запущено."""
+    queue = list(episodes)
+    started = failed = 0
+    while queue:
+        ep = queue.pop(0)
+        items, more = None, []
+        try:
+            items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
+        except Exception:
+            pass  # download_episode повторит запрос и сам сообщит об ошибке
+        if items and ep['episode'] < PACK and items[0].get('whole'):
+            # отдельных серий нет — берём все нужные файлы из раздачи сезона сразу
+            more = [e['episode'] for e in queue if e['season'] == ep['season']]
+            queue = [e for e in queue if e['season'] != ep['season']]
+        if download_episode(bot, chat_id, display(show), ep, items=items, folder=show_folder(show),
+                            quality=quality, manual=manual, more=more):
+            started += 1
+            failed = 0
+            continue
+        failed += 1
+        if queue and (failed >= 3 or not lostfilm.logged_in_as()):
+            _send(bot, chat_id, f'⏹ {display(show)}: остановился, осталось раздач в очереди: {len(queue)}.')
+            break
+    return started
+
+
+_download_lock = threading.Lock()  # две серии из одной раздачи сезона — строго по очереди
 
 
 def download_episode(bot, chat_id: int, show_name: str, ep: dict,
                      items: list[dict] | None = None, quiet_errors: bool = False,
-                     folder: str = '') -> bool:
-    """Скачать серию (ep['episode'] == PACK — сезон целиком) в SERIES_FOLDER/<folder>."""
+                     folder: str = '', quality: str = '', manual: bool = False,
+                     more: list[int] = ()) -> bool:
+    """Скачать серию (ep['episode'] == PACK — сезон целиком) в SERIES_FOLDER/<folder>.
+
+    Если сайт на серию отдаёт раздачу сезона, качаем из неё только эту серию
+    и серии из more. manual — просил пользователь (а не подписка).
+    """
     label = code(ep['season'], ep['episode'])
+    if more:
+        label += f' и ещё {len(more)}'
     where = '/'.join(x for x in (config.SERIES_FOLDER, folder) if x)
     location = os.path.join(config.SHARED_FOLDER, config.SERIES_FOLDER, folder)
+    retry = '' if manual else '\nПопробую ещё раз позже.'
+    extended = False
     try:
         if items is None:
             items = lostfilm.releases(ep['lf_id'], ep['season'], ep['episode'])
-        data = lostfilm.download(_choose(items))
+        item = _choose(items, quality)
+        data = lostfilm.download(item)
         if not os.path.isdir(location):
             os.makedirs(location, exist_ok=True)
             os.chmod(location, 0o2775)  # Transmission (группа media) должен писать сюда
         file_hash = hashlib.sha256(data).hexdigest()
-        if tr.is_active(file_hash):
-            # Transmission молча вернул бы уже добавленный торрент, и мы бы
-            # следили за ним второй раз. Значит, сайт отдал не ту раздачу.
-            raise lostfilm.LostFilmError('LostFilm отдал раздачу, которая уже качается')
-        torrent = tr.add_and_start(data, location)
+        want = None
+        if item.get('whole') and ep['episode'] < PACK:
+            numbers = {(ep['season'], n) for n in (ep['episode'], *more)}
+
+            def want(name):
+                return parse_se(name) in numbers
+        # раздача уже в Transmission: что из неё докачать (сезон целиком — всё остальное)
+        want_more = want
+        if manual and ep['episode'] >= PACK:
+            def want_more(name):
+                return True
+        with _download_lock:
+            watched = tr.is_active(file_hash)
+            if watched and not want_more:
+                # Transmission молча вернул бы уже добавленный торрент, и мы бы
+                # следили за ним второй раз. Значит, сайт отдал не ту раздачу
+                # (или её уже скачивают).
+                if manual:
+                    _send(bot, chat_id, f'ℹ️ {show_name} {label}: эта раздача уже качается. '
+                                        'Список загрузок: /torrents')
+                    return False
+                raise lostfilm.LostFilmError('LostFilm отдал раздачу, которая уже качается')
+            try:
+                torrent = tr.add_and_start(data, location, want)
+            except tr.DuplicateTorrentError as e:
+                # раздача сезона уже в Transmission: нужна ещё серия из неё
+                if not want_more:
+                    raise
+                if not tr.want_more_files(e.torrent, want_more):
+                    if manual:
+                        _send(bot, chat_id, f'ℹ️ {show_name} {label}: уже скачано или качается. '
+                                            'Список загрузок: /torrents')
+                    return not manual  # подписке эта серия больше не нужна
+                torrent, extended = e.torrent, True
+            if not watched:
+                tr.mark_active(file_hash)
     except lostfilm.NeedLogin:
         if not quiet_errors:
             _send(bot, chat_id, f'❌ {show_name} {label}: не скачать без входа.\n{login_hint()}')
@@ -250,18 +440,24 @@ def download_episode(bot, chat_id: int, show_name: str, ep: dict,
     except Exception as e:
         logger.error(f'Series download failed ({show_name} {label}): {e}')
         if not quiet_errors:
-            _send(bot, chat_id, f'⚠️ Не удалось скачать {show_name} {label}: {e}\nПопробую ещё раз позже.')
+            _send(bot, chat_id, f'⚠️ Не удалось скачать {show_name} {label}: {e}{retry}')
         return False
 
-    tr.mark_active(file_hash)
-    if ep['episode'] >= PACK:
-        text = f"⬇️ {show_name} — {label} целиком, качаю в «{where}»"
+    q = quality_of(item)
+    name = f" «{ep['name']}»" if ep.get('name') and ep['episode'] < PACK and not more else ''
+    if watched and extended:
+        _send(bot, chat_id, f'➕ {show_name} — {label}{name}: добавил к раздаче, которая уже качается.')
     else:
-        name = f" «{ep['name']}»" if ep.get('name') else ''
-        text = f"🆕 {show_name} — {label}{name}\nВышла на LostFilm, качаю в «{where}»"
-    msg = _send(bot, chat_id, text)
-    tr.start_monitoring(bot, chat_id, msg.message_id if msg else None, torrent.id, file_hash)
-    logger.info(f'Series download: {show_name} {label}')
+        if manual:
+            whole = ' целиком' if ep['episode'] >= PACK else ''
+            text = f'⬇️ {show_name} — {label}{whole}{name}, {q}\nКачаю в «{where}»'
+        elif ep['episode'] >= PACK:
+            text = f"⬇️ {show_name} — {label} целиком, качаю в «{where}»"
+        else:
+            text = f"🆕 {show_name} — {label}{name}\nВышла на LostFilm, качаю в «{where}»"
+        msg = _send(bot, chat_id, text)
+        tr.start_monitoring(bot, chat_id, msg.message_id if msg else None, torrent.id, file_hash)
+    logger.info(f'Series download: {show_name} {label} ({q})')
     return True
 
 
@@ -292,7 +488,7 @@ def check_new(bot) -> int:
                 logger.warning(f"Series check: {sub['show']}: {e}")
                 continue
             new = sorted((e for e in info['episodes']
-                          if (e['season'], e['episode']) > (sub['season'], sub['episode'])),
+                          if e['season'] != SPECIALS and (e['season'], e['episode']) > (sub['season'], sub['episode'])),
                          key=lambda e: (e['season'], e['episode']))
             for ep in new:  # по порядку; не перепрыгиваем через несскачанную серию
                 if not lostfilm.logged_in_as():

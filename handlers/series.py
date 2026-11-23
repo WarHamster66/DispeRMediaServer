@@ -130,6 +130,17 @@ def _run_follow(bot, message, status, query: str) -> None:
           'Нашлось несколько сериалов — какой? Рядом — последняя вышедшая серия.', kb)
 
 
+def subscribe_button(show: dict, text: str) -> InlineKeyboardButton:
+    """Кнопка «подписаться» для сериала из find_shows() — для других экранов бота."""
+    token = secrets.token_hex(4)
+    with _lock:
+        for k, v in list(_picks.items()):
+            if time.time() - v['ts'] > _TTL:
+                _picks.pop(k, None)
+        _picks[token] = {'shows': [show], 'dl': {}, 'ts': time.time()}
+    return InlineKeyboardButton(text, callback_data=f'ser:pick_{token}_0')
+
+
 def _latest_or_none(show: dict) -> dict | None:
     try:
         return series.latest(show)

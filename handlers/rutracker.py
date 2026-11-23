@@ -1,4 +1,4 @@
-"""Поиск по RuTracker: обычный текст в личке или /find, и вход на сайт (/rutracker)."""
+"""RuTracker: страницы результатов поиска, скачивание и вход на сайт (/rutracker)."""
 import html
 import io
 import logging
@@ -26,79 +26,36 @@ _CAPTCHA_TRIES = 3
 
 
 def register(bot) -> None:
-    """Регистрировать ПОСЛЕДНИМ: обычный текст в личке здесь = поиск, поэтому
-    magnet-ссылки, команды и ответы на вопросы бота должны поймать раньше."""
-    bot.message_handler(commands=['find'])(lambda m: _cmd_find(bot, m))
     bot.message_handler(commands=['rutracker'])(lambda m: _cmd_rutracker(bot, m))
     bot.callback_query_handler(func=lambda c: c.data.startswith('rt:'))(lambda c: _callback(bot, c))
-    bot.message_handler(func=_is_search_text, content_types=['text'])(lambda m: _start_search(bot, m, m.text))
-
-
-def _is_search_text(m) -> bool:
-    text = (m.text or '').strip()
-    return (m.chat.type == 'private' and bool(text) and not text.startswith(('/', 'magnet:'))
-            and rutracker.is_configured() and is_authorized(m.from_user.id))
 
 
 def _thread(target, *args, name: str = 'RuTracker') -> None:
     threading.Thread(target=target, args=args, name=name, daemon=True).start()
 
 
-def _need_login_text() -> str:
+def need_login_text() -> str:
     if not rutracker.is_configured():
         return ('🔎 Поиск по RuTracker ещё не настроен.\n'
                 'Администратор: /rutracker — указать аккаунт (в личке с ботом).')
     return '🔑 Нужно войти на RuTracker: /rutracker'
 
 
-# ── поиск ─────────────────────────────────────────────────────────────────────
+# ── результаты поиска (сам поиск — handlers/search.py) ────────────────────────
 
-def _cmd_find(bot, message) -> None:
-    if not is_authorized(message.from_user.id):
-        bot.reply_to(message, 'Нет доступа.')
-        return
-    parts = (message.text or '').split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(message, 'Что найти? Например: /find Титаник\n'
-                              'В личке с ботом можно просто написать название.')
-        return
-    _start_search(bot, message, parts[1])
-
-
-def _start_search(bot, message, query: str) -> None:
-    query = ' '.join(query.split())[:100]
-    if not rutracker.logged_in_as():
-        bot.reply_to(message, _need_login_text())
-        return
-    status = bot.reply_to(message, f'🔎 Ищу «{query}» на RuTracker…')
-    _thread(_run_search, bot, message.chat.id, status.message_id, query, name='RuTrackerSearch')
-
-
-def _run_search(bot, chat_id: int, message_id: int, query: str) -> None:
-    try:
-        results = rutracker.search(query)
-    except rutracker.NeedLogin:
-        _edit(bot, chat_id, message_id, _need_login_text())
-        return
-    except Exception as e:
-        logger.warning(f'RuTracker search failed: {e}')
-        _edit(bot, chat_id, message_id, f'⚠️ Поиск на RuTracker не удался: {e}')
-        return
-    if not results:
-        _edit(bot, chat_id, message_id, f'🤷 На RuTracker ничего не нашлось по «{query}».\n'
-                                        'Попробуй короче или по-английски.')
-        return
+def add_results(query: str, results: list[dict], back: str = '', note: str = '') -> str:
+    """Запомнить результаты, вернуть token для show_page(). back — callback кнопки «назад»."""
     token = secrets.token_hex(4)
     with _lock:
         now = time.time()
         for k, v in list(_searches.items()):
             if now - v['ts'] > _TTL:
                 _searches.pop(k, None)
-        _searches[token] = {'query': query, 'results': results, 'ts': now}
-    _show_page(bot, chat_id, message_id, token, 0)
+        _searches[token] = {'query': query, 'results': results, 'back': back, 'note': note, 'ts': now}
+    return token
 
 
-def _show_page(bot, chat_id: int, message_id: int, token: str, page: int) -> None:
+def show_page(bot, chat_id: int, message_id: int, token: str, page: int) -> None:
     with _lock:
         found = _searches.get(token)
     if not found:
@@ -115,6 +72,8 @@ def _show_page(bot, chat_id: int, message_id: int, token: str, page: int) -> Non
     for i, r in enumerate(chunk, start=first + 1):
         lines += [_format(i, r), '']
     lines.append('Нажми номер — скачаю торрент и спрошу, в какую папку.')
+    if found.get('note'):
+        lines.append(html.escape(found['note']))
 
     kb = InlineKeyboardMarkup(row_width=4)
     kb.add(*[InlineKeyboardButton(f'⬇️ {i}', callback_data=f'rt:d_{token}_{i - 1}')
@@ -127,7 +86,10 @@ def _show_page(bot, chat_id: int, message_id: int, token: str, page: int) -> Non
         if page < pages - 1:
             nav.append(InlineKeyboardButton('▶️', callback_data=f'rt:p_{token}_{page + 1}'))
         kb.row(*nav)
-    kb.row(InlineKeyboardButton('✖️ Закрыть', callback_data='rt:x'))
+    last = [InlineKeyboardButton('✖️ Закрыть', callback_data='rt:x')]
+    if found.get('back'):
+        last.insert(0, InlineKeyboardButton('↩️ Назад', callback_data=found['back']))
+    kb.row(*last)
     _edit(bot, chat_id, message_id, '\n'.join(lines), kb, html_mode=True)
 
 
@@ -178,7 +140,7 @@ def _download(bot, chat_id: int, message_id: int, user, token: str, idx: int) ->
     try:
         data = rutracker.download(r['id'])
     except rutracker.NeedLogin:
-        bot.send_message(chat_id, _need_login_text())
+        bot.send_message(chat_id, need_login_text())
         return
     except Exception as e:
         logger.warning(f'RuTracker .torrent download failed ({r["id"]}): {e}')
@@ -331,7 +293,7 @@ def _callback(bot, call) -> None:
     elif data.startswith('p_'):
         _, token, page = data.split('_', 2)
         bot.answer_callback_query(call.id)
-        _show_page(bot, chat_id, msg_id, token, int(page))
+        show_page(bot, chat_id, msg_id, token, int(page))
     elif data == 'n':
         bot.answer_callback_query(call.id)
     elif data == 'x':

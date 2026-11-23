@@ -282,7 +282,10 @@ def _parse_items(page: str) -> list[dict]:
 
 
 def releases(lf_id: str, season: int, episode: int) -> list[dict]:
-    """Раздачи серии (episode=PACK — сезон целиком): [{label, desc, size, url, proxy}]."""
+    """Раздачи серии (episode=PACK — сезон целиком): [{label, desc, size, url, proxy, whole}].
+
+    whole — это раздача всего сезона (бывает и в ответ на запрос одной серии).
+    """
     with _lock:
         auth = dict(_auth)
     if not auth:
@@ -324,8 +327,11 @@ def releases(lf_id: str, season: int, episode: int) -> list[dict]:
     title = ' | '.join(filter(None, (_text(_find(r'inner-box--subtitle[^>]*>(.*?)</div>', page)),
                                      _text(_find(r'inner-box--text[^>]*>(.*?)</div>', page)))))
     logger.info(f'LostFilm: раздачи a={code}: {title or "?"} — {len(items)} шт.')
+    # У старых сериалов раздач по одной серии нет: на любую серию сайт отдаёт сезон целиком
+    whole = episode == PACK or ('сезон' in title.lower() and 'серия' not in title.lower())
     for it in items:
         it['proxy'] = via_proxy
+        it['whole'] = whole
     return items
 
 

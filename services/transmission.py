@@ -232,7 +232,8 @@ def _local_error(torrent) -> str:
 
 def _is_complete(torrent) -> bool:
     if torrent.status in ('seeding', 'seed pending'):  # seed pending — ждёт очереди раздач
-        return True
+        # left > 0: к раздаче только что добавили серии, Transmission ещё не переключился
+        return _left_bytes(torrent) == 0
     # Скачан целиком, но стоит на паузе (например, поставили паузу на 100%)
     done = getattr(torrent, 'percent_done', 0) or 0
     return torrent.status == 'stopped' and done >= 1.0 and _wanted_size(torrent) > 0
@@ -284,8 +285,49 @@ def add_magnet(magnet_link: str):
     return torrent
 
 
-def add_and_start(source: bytes | str, location: str):
+class NoSuchFilesError(Exception):
+    """В раздаче нет нужных файлов."""
+
+
+def _pick_files(torrent, want) -> tuple[list[int], list[int], int]:
+    """(нужные id, остальные id, размер нужных) — want(имя файла) → bool."""
+    files = list(enumerate(torrent.get_files()))
+    ids = [i for i, f in files if want(f.name)]
+    if not ids:
+        raise NoSuchFilesError('в раздаче нет нужной серии')
+    rest = [i for i, _ in files if i not in ids]
+    return ids, rest, sum(f.size for i, f in files if i in ids)
+
+
+def want_more_files(torrent, want) -> bool:
+    """Докачать файлы из торрента, который уже есть в Transmission.
+
+    False — все эти файлы уже выбраны (качаются или скачаны).
+    """
+    tc = get_client()
+    torrent = tc.get_torrent(_hash_of(torrent))
+    ids, _, _ = _pick_files(torrent, want)
+    files = torrent.get_files()
+    new = [i for i in ids if not files[i].selected]
+    if not new:
+        return False
+    required = sum(files[i].size - files[i].completed for i in new)
+    free = psutil.disk_usage(torrent.download_dir).free
+    if free < required:
+        raise InsufficientSpaceError(required, free)
+    with _watch_lock:  # снова качается — срок раздачи начнётся заново после загрузки
+        data = _seed_load()
+        if data.pop(_hash_of(torrent), None):
+            _seed_save(data)
+    tc.change_torrent(torrent.id, files_wanted=new)
+    tc.start_torrent(torrent.id)
+    return True
+
+
+def add_and_start(source: bytes | str, location: str, want=None):
     """Добавить торрент (bytes .torrent или magnet) сразу в папку и запустить.
+
+    want(имя файла) → bool — качать только эти файлы (серия из раздачи сезона).
 
     Для автоскачивания без участия пользователя (подписки на сериалы).
     Место проверяется на диске целевой папки. Raises InsufficientSpaceError.
@@ -299,11 +341,18 @@ def add_and_start(source: bytes | str, location: str):
     if _hash_of(torrent) in known:
         raise DuplicateTorrentError(torrent)
     size = torrent.total_size or 0
-    if size > 0:
-        free = psutil.disk_usage(location).free
-        if free < size:
-            tc.remove_torrent(torrent.id, delete_data=False)
-            raise InsufficientSpaceError(size, free)
+    try:
+        if want:
+            ids, rest, size = _pick_files(torrent, want)
+            if rest:
+                tc.change_torrent(torrent.id, files_wanted=ids, files_unwanted=rest)
+        if size > 0:
+            free = psutil.disk_usage(location).free
+            if free < size:
+                raise InsufficientSpaceError(size, free)
+    except Exception:
+        tc.remove_torrent(torrent.id, delete_data=False)
+        raise
     tc.start_torrent(torrent.id)
     return torrent
 

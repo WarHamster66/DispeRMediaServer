@@ -144,7 +144,7 @@ def _cmd_help(bot, message) -> None:
         return
     text = (
         '📖 Команды:\n\n'
-        '🔎 Поиск (RuTracker)\n'
+        '🔎 Поиск (LostFilm и RuTracker)\n'
         'Просто напиши название фильма или сериала — найду\n'
         '/find — то же самое командой (работает и в группах)\n'
         '/rutracker — аккаунт и вход на RuTracker\n\n'
